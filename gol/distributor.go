@@ -3,6 +3,7 @@ package gol
 import (
 	"fmt"
 	"sync"
+	"time"
 
 	"uk.ac.bris.cs/gameoflife/util"
 )
@@ -96,9 +97,31 @@ func distributor(p Params, c distributorChannels) {
 	sectionSize := p.ImageHeight / p.Threads
 
 	var wg sync.WaitGroup
+	var mu sync.Mutex
 
 	completedTurns := 0
 	aliveCells := calculateAliveCells(p, worldSlice)
+
+	ticker := time.NewTicker(2 * time.Second)
+	done := make(chan bool)
+	defer ticker.Stop()
+	defer close(done)
+
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				mu.Lock()
+				safecompletedTurns := completedTurns
+				safealiveCells := aliveCells
+				mu.Unlock()
+
+				c.events <- AliveCellsCount{CompletedTurns: safecompletedTurns, CellsCount: len(safealiveCells)}
+			}
+		}
+	}()
 
 	for i := 0; i < p.Turns; i++ {
 		for w := 0; w < p.Threads; w++ {
@@ -108,6 +131,7 @@ func distributor(p Params, c distributorChannels) {
 			if w == p.Threads-1 {
 				endY = p.ImageHeight
 			}
+
 			wg.Add(1)
 
 			go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg)
@@ -118,9 +142,11 @@ func distributor(p Params, c distributorChannels) {
 
 		worldSlice, newWorld = newWorld, worldSlice
 
+		mu.Lock()
 		completedTurns = i + 1
-
 		aliveCells = calculateAliveCells(p, worldSlice)
+		mu.Unlock()
+
 		c.events <- TurnComplete{CompletedTurns: completedTurns}
 
 	}
