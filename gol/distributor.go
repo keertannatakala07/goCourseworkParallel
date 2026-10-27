@@ -2,6 +2,7 @@ package gol
 
 import (
 	"fmt"
+	"sync"
 
 	"uk.ac.bris.cs/gameoflife/util"
 )
@@ -15,13 +16,11 @@ type distributorChannels struct {
 	ioInput    <-chan uint8
 }
 
-func calculateNextState(p Params, world [][]byte) [][]byte {
-	newWorld := make([][]byte, p.ImageHeight)
-	for i := range newWorld {
-		newWorld[i] = make([]byte, p.ImageWidth)
-	}
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup) {
 
-	for row := 0; row < p.ImageHeight; row++ {
+	defer wg.Done()
+
+	for row := startY; row < endY; row++ {
 		for column := 0; column < p.ImageWidth; column++ {
 			liveCells := 0
 			for dr := -1; dr <= 1; dr++ {
@@ -39,13 +38,18 @@ func calculateNextState(p Params, world [][]byte) [][]byte {
 			if world[row][column] == 255 {
 				if liveCells == 2 || liveCells == 3 {
 					newWorld[row][column] = 255
+				} else {
+					newWorld[row][column] = 0
 				}
-			} else if liveCells == 3 {
-				newWorld[row][column] = 255
+			} else {
+				if liveCells == 3 {
+					newWorld[row][column] = 255
+				} else {
+					newWorld[row][column] = 0
+				}
 			}
 		}
 	}
-	return newWorld
 }
 
 func calculateAliveCells(p Params, world [][]byte) []util.Cell {
@@ -64,7 +68,6 @@ func calculateAliveCells(p Params, world [][]byte) []util.Cell {
 
 // distributor divides the work between workers and interacts with other goroutines.
 func distributor(p Params, c distributorChannels) {
-
 	// TODO: Create a 2D slice to store the world.
 	c.ioCommand <- ioInput
 	filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
@@ -85,12 +88,36 @@ func distributor(p Params, c distributorChannels) {
 	c.events <- StateChange{turn, Executing}
 
 	// TODO: Execute all turns of the Game of Life.
-	completedTurns := 0
+	newWorld := make([][]byte, p.ImageHeight)
+	for i := range newWorld {
+		newWorld[i] = make([]byte, p.ImageWidth)
+	}
 
+	sectionSize := p.ImageHeight / p.Threads
+
+	var wg sync.WaitGroup
+
+	completedTurns := 0
 	aliveCells := calculateAliveCells(p, worldSlice)
 
 	for i := 0; i < p.Turns; i++ {
-		worldSlice = calculateNextState(p, worldSlice)
+		for w := 0; w < p.Threads; w++ {
+			startY := w * sectionSize
+			endY := (w + 1) * sectionSize
+
+			if w == p.Threads-1 {
+				endY = p.ImageHeight
+			}
+			wg.Add(1)
+
+			go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg)
+
+		}
+
+		wg.Wait()
+
+		worldSlice, newWorld = newWorld, worldSlice
+
 		completedTurns = i + 1
 
 		aliveCells = calculateAliveCells(p, worldSlice)
