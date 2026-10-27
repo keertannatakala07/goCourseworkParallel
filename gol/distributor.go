@@ -151,12 +151,24 @@ func distributor(p Params, c distributorChannels) {
 
 	}
 
-	// TODO: Report the final state using FinalTurnCompleteEvent.
-	c.events <- FinalTurnComplete{CompletedTurns: completedTurns, Alive: aliveCells}
+	//write to pgm file
+	c.ioCommand <- ioOutput
+	outputFilename := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+	c.ioFilename <- outputFilename
+
+	for row := 0; row < p.ImageHeight; row++ {
+		for column := 0; column < p.ImageWidth; column++ {
+			c.ioOutput <- worldSlice[row][column]
+		}
+	}
+
 	// Make sure that the Io has finished any output before exiting.
 	c.ioCommand <- ioCheckIdle
 	<-c.ioIdle
 
+	// TODO: Report the final state using FinalTurnCompleteEvent.
+	c.events <- FinalTurnComplete{CompletedTurns: completedTurns, Alive: aliveCells}
+	c.events <- ImageOutputComplete{CompletedTurns: completedTurns, Filename: outputFilename}
 	c.events <- StateChange{turn, Quitting}
 
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
