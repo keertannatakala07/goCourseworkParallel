@@ -15,13 +15,21 @@ type distributorChannels struct {
 	ioFilename chan<- string
 	ioOutput   chan<- uint8
 	ioInput    <-chan uint8
+	keyPresses <-chan rune
 }
 
-func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup) {
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond) {
 
 	defer wg.Done()
 
 	for row := startY; row < endY; row++ {
+
+		mu.Lock()
+		for *pause {
+			cond.Wait()
+		}
+		mu.Unlock()
+
 		for column := 0; column < p.ImageWidth; column++ {
 			liveCells := 0
 			for dr := -1; dr <= 1; dr++ {
@@ -98,6 +106,10 @@ func distributor(p Params, c distributorChannels) {
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	var cond = sync.NewCond(&mu)
+
+	mustQuit := false
+	pause := false
 
 	completedTurns := 0
 	aliveCells := calculateAliveCells(p, worldSlice)
@@ -114,11 +126,106 @@ func distributor(p Params, c distributorChannels) {
 				return
 			case <-ticker.C:
 				mu.Lock()
+				for pause {
+					cond.Wait()
+				}
+				mu.Unlock()
+
+				mu.Lock()
 				safecompletedTurns := completedTurns
 				safealiveCells := aliveCells
 				mu.Unlock()
 
 				c.events <- AliveCellsCount{CompletedTurns: safecompletedTurns, CellsCount: len(safealiveCells)}
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			select {
+			case k := <-c.keyPresses:
+				fmt.Println("key received:", string(k))
+
+				if k == 's' {
+
+					mu.Lock()
+
+					safeTurns := completedTurns
+
+					worldCopy := make([][]byte, p.ImageHeight)
+					for r := range worldSlice {
+						worldCopy[r] = make([]byte, p.ImageWidth)
+						copy(worldCopy[r], worldSlice[r])
+					}
+
+					mu.Unlock()
+
+					c.ioCommand <- ioOutput
+
+					outputFilename := fmt.Sprintf(
+						"%dx%dx%d",
+						p.ImageWidth,
+						p.ImageHeight,
+						safeTurns,
+					)
+
+					c.ioFilename <- outputFilename
+
+					for row := 0; row < p.ImageHeight; row++ {
+						for column := 0; column < p.ImageWidth; column++ {
+							c.ioOutput <- worldCopy[row][column]
+						}
+					}
+
+					c.ioCommand <- ioCheckIdle
+					<-c.ioIdle
+
+					c.events <- ImageOutputComplete{
+						CompletedTurns: safeTurns,
+						Filename:       outputFilename,
+					}
+				} else if k == 'q' {
+					mu.Lock()
+					mustQuit = true
+					mu.Unlock()
+
+					mu.Lock()
+					pause = false
+					cond.Broadcast()
+					mu.Unlock()
+
+					c.events <- StateChange{
+						CompletedTurns: completedTurns,
+						NewState:       Quitting,
+					}
+
+					done <- true
+					return
+				} else if k == 'p' {
+					mu.Lock()
+					if pause {
+						fmt.Println("Resuming the simulation.")
+						pause = false
+						cond.Broadcast()
+						mu.Unlock()
+						c.events <- StateChange{
+							CompletedTurns: completedTurns,
+							NewState:       Executing,
+						}
+
+					} else {
+						fmt.Println("Pausing the simulation. Press 'p' again to resume.")
+						pause = true
+						mu.Unlock()
+						c.events <- StateChange{
+							CompletedTurns: completedTurns,
+							NewState:       Paused,
+						}
+					}
+				}
+			case <-done:
+				return
 			}
 		}
 	}()
@@ -134,26 +241,34 @@ func distributor(p Params, c distributorChannels) {
 
 			wg.Add(1)
 
-			go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg)
+			go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond)
 
 		}
 
 		wg.Wait()
 
-		worldSlice, newWorld = newWorld, worldSlice
-
 		mu.Lock()
+		worldSlice, newWorld = newWorld, worldSlice
 		completedTurns = i + 1
 		aliveCells = calculateAliveCells(p, worldSlice)
 		mu.Unlock()
 
+		mu.Lock()
+		if mustQuit {
+			mu.Unlock()
+			break
+		}
+		mu.Unlock()
 		c.events <- TurnComplete{CompletedTurns: completedTurns}
-
 	}
-
-	//write to pgm file
 	c.ioCommand <- ioOutput
-	outputFilename := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+	var outputFilename string
+
+	if mustQuit {
+		outputFilename = fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, completedTurns)
+	} else {
+		outputFilename = fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+	}
 	c.ioFilename <- outputFilename
 
 	for row := 0; row < p.ImageHeight; row++ {
