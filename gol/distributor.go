@@ -18,7 +18,7 @@ type distributorChannels struct {
 	keyPresses <-chan rune
 }
 
-func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond) {
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond, events chan<- Event, currentTurn int) {
 
 	defer wg.Done()
 
@@ -44,17 +44,30 @@ func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld
 					}
 				}
 			}
+
+			var testChangeWorld byte
+
 			if world[row][column] == 255 {
 				if liveCells == 2 || liveCells == 3 {
-					newWorld[row][column] = 255
+					testChangeWorld = 255
 				} else {
-					newWorld[row][column] = 0
+					testChangeWorld = 0
 				}
 			} else {
 				if liveCells == 3 {
-					newWorld[row][column] = 255
+					testChangeWorld = 255
+
 				} else {
-					newWorld[row][column] = 0
+					testChangeWorld = 0
+				}
+			}
+
+			newWorld[row][column] = testChangeWorld
+
+			if world[row][column] != testChangeWorld {
+				events <- CellFlipped{
+					CompletedTurns: currentTurn,
+					Cell:           util.Cell{X: column, Y: row},
 				}
 			}
 		}
@@ -93,8 +106,20 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}
 
+	var firstAliveCells []util.Cell
+	for i := 0; i < p.ImageHeight; i++ {
+		for j := 0; j < p.ImageWidth; j++ {
+			if worldSlice[i][j] == 255 {
+				firstAliveCells = append(firstAliveCells, util.Cell{X: j, Y: i})
+			}
+		}
+	}
+
+	c.events <- CellsFlipped{CompletedTurns: 0, Cells: firstAliveCells}
+
+	c.events <- StateChange{CompletedTurns: 0, NewState: Executing}
+
 	turn := 0
-	c.events <- StateChange{turn, Executing}
 
 	// TODO: Execute all turns of the Game of Life.
 	newWorld := make([][]byte, p.ImageHeight)
@@ -231,6 +256,8 @@ func distributor(p Params, c distributorChannels) {
 	}()
 
 	for i := 0; i < p.Turns; i++ {
+		currentTurn := i + 1
+
 		for w := 0; w < p.Threads; w++ {
 			startY := w * sectionSize
 			endY := (w + 1) * sectionSize
@@ -241,7 +268,7 @@ func distributor(p Params, c distributorChannels) {
 
 			wg.Add(1)
 
-			go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond)
+			go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond, c.events, currentTurn)
 
 		}
 
