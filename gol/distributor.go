@@ -245,7 +245,7 @@ func distributor(p Params, c distributorChannels) {
 
 						c.events <- StateChange{
 							CompletedTurns: turns,
-							NewState:       Quitting,
+							NewState:       Executing,
 						}
 
 					} else {
