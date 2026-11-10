@@ -220,8 +220,12 @@ func distributor(p Params, c distributorChannels) {
 					cond.Broadcast()
 					mu.Unlock()
 
+					mu.Lock()
+					turns := completedTurns
+					mu.Unlock()
+
 					c.events <- StateChange{
-						CompletedTurns: completedTurns,
+						CompletedTurns: turns,
 						NewState:       Quitting,
 					}
 
@@ -234,9 +238,14 @@ func distributor(p Params, c distributorChannels) {
 						pause = false
 						cond.Broadcast()
 						mu.Unlock()
+
+						mu.Lock()
+						turns := completedTurns
+						mu.Unlock()
+
 						c.events <- StateChange{
-							CompletedTurns: completedTurns,
-							NewState:       Executing,
+							CompletedTurns: turns,
+							NewState:       Quitting,
 						}
 
 					} else {
