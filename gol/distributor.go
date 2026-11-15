@@ -18,59 +18,70 @@ type distributorChannels struct {
 	keyPresses <-chan rune
 }
 
-func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond, events chan<- Event, currentTurn int) {
+type job struct {
+	startY      int
+	endY        int
+	world       [][]byte
+	newWorld    [][]byte
+	currentTurn int
+}
+
+func calculateNextState(p Params, jobs <-chan job, results chan<- bool, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond, events chan<- Event) {
 
 	defer wg.Done()
+	for j := range jobs {
+		for row := j.startY; row < j.endY; row++ {
 
-	for row := startY; row < endY; row++ {
+			mu.Lock()
+			for *pause {
+				cond.Wait()
+			}
+			mu.Unlock()
 
-		mu.Lock()
-		for *pause {
-			cond.Wait()
-		}
-		mu.Unlock()
-
-		for column := 0; column < p.ImageWidth; column++ {
-			liveCells := 0
-			for dr := -1; dr <= 1; dr++ {
-				for dc := -1; dc <= 1; dc++ {
-					if dr == 0 && dc == 0 {
-						continue
+			for column := 0; column < p.ImageWidth; column++ {
+				liveCells := 0
+				for dr := -1; dr <= 1; dr++ {
+					for dc := -1; dc <= 1; dc++ {
+						if dr == 0 && dc == 0 {
+							continue
+						}
+						nRow := (row + dr + p.ImageHeight) % p.ImageHeight
+						nCol := (column + dc + p.ImageWidth) % p.ImageWidth
+						if j.world[nRow][nCol] == 255 {
+							liveCells++
+						}
 					}
-					nRow := (row + dr + p.ImageHeight) % p.ImageHeight
-					nCol := (column + dc + p.ImageWidth) % p.ImageWidth
-					if world[nRow][nCol] == 255 {
-						liveCells++
+				}
+
+				var testChangeWorld byte
+
+				if j.world[row][column] == 255 {
+					if liveCells == 2 || liveCells == 3 {
+						testChangeWorld = 255
+					} else {
+						testChangeWorld = 0
+					}
+				} else {
+					if liveCells == 3 {
+						testChangeWorld = 255
+
+					} else {
+						testChangeWorld = 0
+					}
+				}
+
+				j.newWorld[row][column] = testChangeWorld
+
+				if j.world[row][column] != testChangeWorld {
+					events <- CellFlipped{
+						CompletedTurns: j.currentTurn,
+						Cell:           util.Cell{X: column, Y: row},
 					}
 				}
 			}
-
-			var testChangeWorld byte
-
-			if world[row][column] == 255 {
-				if liveCells == 2 || liveCells == 3 {
-					testChangeWorld = 255
-				} else {
-					testChangeWorld = 0
-				}
-			} else {
-				if liveCells == 3 {
-					testChangeWorld = 255
-
-				} else {
-					testChangeWorld = 0
-				}
-			}
-
-			newWorld[row][column] = testChangeWorld
-
-			if world[row][column] != testChangeWorld {
-				events <- CellFlipped{
-					CompletedTurns: currentTurn,
-					Cell:           util.Cell{X: column, Y: row},
-				}
-			}
 		}
+		results <- true
+
 	}
 }
 
@@ -264,6 +275,15 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}()
 
+	jobs := make(chan job, p.Threads)
+	results := make(chan bool, p.Threads)
+
+	for w := 0; w < p.Threads; w++ {
+
+		wg.Add(1)
+		go calculateNextState(p, jobs, results, &wg, &mu, &pause, cond, c.events)
+	}
+
 	for i := 0; i < p.Turns; i++ {
 		currentTurn := i + 1
 
@@ -274,16 +294,22 @@ func distributor(p Params, c distributorChannels) {
 			if w == p.Threads-1 {
 				endY = p.ImageHeight
 			}
-
-			wg.Add(1)
-
-			go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond, c.events, currentTurn)
+			jobs <- job{
+				startY:      startY,
+				endY:        endY,
+				world:       worldSlice,
+				newWorld:    newWorld,
+				currentTurn: currentTurn,
+			}
 
 		}
-
-		wg.Wait()
+		//wait for all workers to say their results are done
+		for w := 0; w < p.Threads; w++ {
+			<-results
+		}
 
 		mu.Lock()
+		//pointer swap
 		worldSlice, newWorld = newWorld, worldSlice
 		completedTurns = i + 1
 		aliveCells = calculateAliveCells(p, worldSlice)
@@ -297,6 +323,9 @@ func distributor(p Params, c distributorChannels) {
 		mu.Unlock()
 		c.events <- TurnComplete{CompletedTurns: completedTurns}
 	}
+
+	close(jobs)
+	wg.Wait()
 	c.ioCommand <- ioOutput
 	var outputFilename string
 
