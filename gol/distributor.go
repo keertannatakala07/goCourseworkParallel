@@ -141,6 +141,8 @@ func distributor(p Params, c distributorChannels) {
 	// TODO: Execute all turns of the Game of Life.
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+
+	//wait group for the ticker and keyboard go rountines
 	var bg sync.WaitGroup
 
 	var cond = sync.NewCond(&mu)
