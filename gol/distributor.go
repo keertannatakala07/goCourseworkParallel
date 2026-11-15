@@ -130,6 +130,7 @@ func distributor(p Params, c distributorChannels) {
 	sectionSize := p.ImageHeight / p.Threads
 
 	var wg sync.WaitGroup
+	var bg sync.WaitGroup
 	var mu sync.Mutex
 	var cond = sync.NewCond(&mu)
 
@@ -141,10 +142,10 @@ func distributor(p Params, c distributorChannels) {
 
 	ticker := time.NewTicker(2 * time.Second)
 	done := make(chan bool)
-	defer ticker.Stop()
-	defer close(done)
 
+	bg.Add(1)
 	go func() {
+		defer bg.Done()
 		for {
 			select {
 			case <-done:
@@ -166,7 +167,9 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}()
 
+	bg.Add(1)
 	go func() {
+		defer bg.Done()
 		for {
 			select {
 			case k := <-c.keyPresses:
@@ -323,5 +326,10 @@ func distributor(p Params, c distributorChannels) {
 	c.events <- StateChange{turn, Quitting}
 
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+	ticker.Stop()
+	close(done)
+	bg.Wait()
+
 	close(c.events)
+
 }
