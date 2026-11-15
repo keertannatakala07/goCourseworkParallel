@@ -119,8 +119,6 @@ func distributor(p Params, c distributorChannels) {
 
 	c.events <- StateChange{CompletedTurns: 0, NewState: Executing}
 
-	turn := 0
-
 	// TODO: Execute all turns of the Game of Life.
 	newWorld := make([][]byte, p.ImageHeight)
 	for i := range newWorld {
@@ -216,23 +214,20 @@ func distributor(p Params, c distributorChannels) {
 				} else if k == 'q' {
 					mu.Lock()
 					mustQuit = true
-					mu.Unlock()
-
-					mu.Lock()
 					pause = false
 					cond.Broadcast()
 					mu.Unlock()
 
-					mu.Lock()
-					turns := completedTurns
-					mu.Unlock()
+					// mu.Lock()
+					// turns := completedTurns
+					// mu.Unlock()
 
-					c.events <- StateChange{
-						CompletedTurns: turns,
-						NewState:       Quitting,
-					}
+					// c.events <- StateChange{
+					// 	CompletedTurns: turns,
+					// 	NewState:       Quitting,
+					// }
 
-					done <- true
+					// done <- true
 					return
 				} else if k == 'p' {
 					mu.Lock()
@@ -254,9 +249,11 @@ func distributor(p Params, c distributorChannels) {
 					} else {
 						fmt.Println("Pausing the simulation. Press 'p' again to resume.")
 						pause = true
+						turns := completedTurns
 						mu.Unlock()
+
 						c.events <- StateChange{
-							CompletedTurns: completedTurns,
+							CompletedTurns: turns,
 							NewState:       Paused,
 						}
 					}
@@ -303,9 +300,13 @@ func distributor(p Params, c distributorChannels) {
 	c.ioCommand <- ioOutput
 	var outputFilename string
 
+	// if quit add the output file name with only the turns completed so far
+	mu.Lock()
 	if mustQuit {
+		mu.Unlock()
 		outputFilename = fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, completedTurns)
 	} else {
+		mu.Unlock()
 		outputFilename = fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
 	}
 	c.ioFilename <- outputFilename
@@ -323,7 +324,7 @@ func distributor(p Params, c distributorChannels) {
 	// TODO: Report the final state using FinalTurnCompleteEvent.
 	c.events <- FinalTurnComplete{CompletedTurns: completedTurns, Alive: aliveCells}
 	c.events <- ImageOutputComplete{CompletedTurns: completedTurns, Filename: outputFilename}
-	c.events <- StateChange{turn, Quitting}
+	c.events <- StateChange{completedTurns, Quitting}
 
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 	ticker.Stop()
