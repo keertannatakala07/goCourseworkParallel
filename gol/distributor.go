@@ -8,6 +8,12 @@ import (
 	"uk.ac.bris.cs/gameoflife/util"
 )
 
+type workerResult struct {
+	startY int
+	endY   int
+	strip  [][]byte
+}
+
 type distributorChannels struct {
 	events     chan<- Event
 	ioCommand  chan<- ioCommand
@@ -18,12 +24,18 @@ type distributorChannels struct {
 	keyPresses <-chan rune
 }
 
-func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond, events chan<- Event, currentTurn int) {
+func calculateNextState(p Params, startY int, endY int, world [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond, events chan<- Event, currentTurn int, resultChan chan<- workerResult) {
 
 	defer wg.Done()
 
-	for row := startY; row < endY; row++ {
+	stripHeight := endY - startY
+	strip := make([][]byte, stripHeight)
+	for i := range strip {
+		strip[i] = make([]byte, p.ImageWidth)
+	}
 
+	for row := startY; row < endY; row++ {
+		stripRow := row - startY
 		mu.Lock()
 		for *pause {
 			cond.Wait()
@@ -62,7 +74,7 @@ func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld
 				}
 			}
 
-			newWorld[row][column] = testChangeWorld
+			strip[stripRow][column] = testChangeWorld
 
 			if world[row][column] != testChangeWorld {
 				events <- CellFlipped{
@@ -71,6 +83,11 @@ func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld
 				}
 			}
 		}
+	}
+	resultChan <- workerResult{
+		startY: startY,
+		endY:   endY,
+		strip:  strip,
 	}
 }
 
@@ -122,15 +139,10 @@ func distributor(p Params, c distributorChannels) {
 	turn := 0
 
 	// TODO: Execute all turns of the Game of Life.
-	newWorld := make([][]byte, p.ImageHeight)
-	for i := range newWorld {
-		newWorld[i] = make([]byte, p.ImageWidth)
-	}
-
-	sectionSize := p.ImageHeight / p.Threads
-
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	var bg sync.WaitGroup
+
 	var cond = sync.NewCond(&mu)
 
 	mustQuit := false
@@ -141,10 +153,10 @@ func distributor(p Params, c distributorChannels) {
 
 	ticker := time.NewTicker(2 * time.Second)
 	done := make(chan bool)
-	defer ticker.Stop()
-	defer close(done)
 
+	bg.Add(1)
 	go func() {
+		defer bg.Done()
 		for {
 			select {
 			case <-done:
@@ -166,7 +178,9 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}()
 
+	bg.Add(1)
 	go func() {
+		defer bg.Done()
 		for {
 			select {
 			case k := <-c.keyPresses:
@@ -228,8 +242,6 @@ func distributor(p Params, c distributorChannels) {
 						CompletedTurns: turns,
 						NewState:       Quitting,
 					}
-
-					done <- true
 					return
 				} else if k == 'p' {
 					mu.Lock()
@@ -264,27 +276,43 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}()
 
+	sectionSize := p.ImageHeight / p.Threads
+	remainder := p.ImageHeight % p.Threads
+
 	for i := 0; i < p.Turns; i++ {
+		startY := 0
+
 		currentTurn := i + 1
 
-		for w := 0; w < p.Threads; w++ {
-			startY := w * sectionSize
-			endY := (w + 1) * sectionSize
+		resultChan := make(chan workerResult, p.Threads)
 
-			if w == p.Threads-1 {
-				endY = p.ImageHeight
+		for w := 0; w < p.Threads; w++ {
+			sectionHeight := sectionSize
+			//each worker less than remainder gets 1 extra line until all used up
+			if w < remainder {
+				sectionHeight++
 			}
+			endY := startY + sectionHeight
 
 			wg.Add(1)
+			go calculateNextState(p, startY, endY, worldSlice, &wg, &mu, &pause, cond, c.events, currentTurn, resultChan)
 
-			go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond, c.events, currentTurn)
-
+			startY = endY
 		}
 
 		wg.Wait()
+		close(resultChan)
+
+		newWorld := make([][]byte, p.ImageHeight)
+		for res := range resultChan {
+			for r := 0; r < (res.endY - res.startY); r++ {
+				targetRow := res.startY + r
+				newWorld[targetRow] = res.strip[r]
+			}
+		}
 
 		mu.Lock()
-		worldSlice, newWorld = newWorld, worldSlice
+		worldSlice = newWorld
 		completedTurns = i + 1
 		aliveCells = calculateAliveCells(p, worldSlice)
 		mu.Unlock()
@@ -295,6 +323,7 @@ func distributor(p Params, c distributorChannels) {
 			break
 		}
 		mu.Unlock()
+
 		c.events <- TurnComplete{CompletedTurns: completedTurns}
 	}
 	c.ioCommand <- ioOutput
@@ -323,5 +352,8 @@ func distributor(p Params, c distributorChannels) {
 	c.events <- StateChange{turn, Quitting}
 
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+	ticker.Stop()
+	close(done)
+	bg.Wait()
 	close(c.events)
 }
