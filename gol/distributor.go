@@ -18,17 +18,7 @@ type distributorChannels struct {
 	keyPresses <-chan rune
 }
 
-func calculateNextState(
-	p Params,
-	startY int,
-	endY int,
-	world [][]byte,
-	wg *sync.WaitGroup,
-	mu *sync.Mutex,
-	pause *bool,
-	cond *sync.Cond,
-	cellsChange chan<- util.Cell,
-) {
+func calculateNextState(p Params, startY int, endY int, world [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond, cellsChange chan<- util.Cell) {
 	defer wg.Done()
 
 	for row := startY; row < endY; row++ {
@@ -74,6 +64,7 @@ func calculateNextState(
 		}
 	}
 }
+
 func calculateAliveCells(p Params, world [][]byte) []util.Cell {
 	cellCoordsSlice := []util.Cell{}
 
@@ -289,7 +280,7 @@ func distributor(p Params, c distributorChannels) {
 				worldSlice[cell.Y][cell.X] = 255
 			}
 		}
-
+		completedTurns = currentTurn
 		aliveCells = calculateAliveCells(p, worldSlice)
 		mu.Unlock()
 
