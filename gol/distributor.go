@@ -18,12 +18,20 @@ type distributorChannels struct {
 	keyPresses <-chan rune
 }
 
-func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond, events chan<- Event, currentTurn int) {
-
+func calculateNextState(
+	p Params,
+	startY int,
+	endY int,
+	world [][]byte,
+	wg *sync.WaitGroup,
+	mu *sync.Mutex,
+	pause *bool,
+	cond *sync.Cond,
+	cellsChange chan<- util.Cell,
+) {
 	defer wg.Done()
 
 	for row := startY; row < endY; row++ {
-
 		mu.Lock()
 		for *pause {
 			cond.Wait()
@@ -46,7 +54,6 @@ func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld
 			}
 
 			var testChangeWorld byte
-
 			if world[row][column] == 255 {
 				if liveCells == 2 || liveCells == 3 {
 					testChangeWorld = 255
@@ -56,24 +63,17 @@ func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld
 			} else {
 				if liveCells == 3 {
 					testChangeWorld = 255
-
 				} else {
 					testChangeWorld = 0
 				}
 			}
 
-			newWorld[row][column] = testChangeWorld
-
 			if world[row][column] != testChangeWorld {
-				events <- CellFlipped{
-					CompletedTurns: currentTurn,
-					Cell:           util.Cell{X: column, Y: row},
-				}
+				cellsChange <- util.Cell{X: column, Y: row}
 			}
 		}
 	}
 }
-
 func calculateAliveCells(p Params, world [][]byte) []util.Cell {
 	cellCoordsSlice := []util.Cell{}
 
@@ -120,10 +120,6 @@ func distributor(p Params, c distributorChannels) {
 	c.events <- StateChange{CompletedTurns: 0, NewState: Executing}
 
 	// TODO: Execute all turns of the Game of Life.
-	newWorld := make([][]byte, p.ImageHeight)
-	for i := range newWorld {
-		newWorld[i] = make([]byte, p.ImageWidth)
-	}
 
 	sectionSize := p.ImageHeight / p.Threads
 
@@ -217,18 +213,8 @@ func distributor(p Params, c distributorChannels) {
 					pause = false
 					cond.Broadcast()
 					mu.Unlock()
-
-					// mu.Lock()
-					// turns := completedTurns
-					// mu.Unlock()
-
-					// c.events <- StateChange{
-					// 	CompletedTurns: turns,
-					// 	NewState:       Quitting,
-					// }
-
-					// done <- true
 					return
+
 				} else if k == 'p' {
 					mu.Lock()
 					if pause {
@@ -266,6 +252,7 @@ func distributor(p Params, c distributorChannels) {
 
 	for i := 0; i < p.Turns; i++ {
 		currentTurn := i + 1
+		cellsChange := make(chan util.Cell, 64)
 
 		for w := 0; w < p.Threads; w++ {
 			startY := w * sectionSize
@@ -277,17 +264,42 @@ func distributor(p Params, c distributorChannels) {
 
 			wg.Add(1)
 
-			go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond, c.events, currentTurn)
+			go calculateNextState(p, startY, endY, worldSlice, &wg, &mu, &pause, cond, cellsChange)
 
 		}
 
-		wg.Wait()
+		//close channel to release blocking loop
+		go func() {
+			wg.Wait()
+			close(cellsChange)
+		}()
 
+		//add cells from buffer to a slice (blocking loop until the channel is closed)
+		var flippedCells []util.Cell
+		for cell := range cellsChange {
+			flippedCells = append(flippedCells, cell)
+		}
+
+		//go through list and update relevant cells accordingly
 		mu.Lock()
-		worldSlice, newWorld = newWorld, worldSlice
-		completedTurns = i + 1
+		for _, cell := range flippedCells {
+			if worldSlice[cell.Y][cell.X] == 255 {
+				worldSlice[cell.Y][cell.X] = 0
+			} else {
+				worldSlice[cell.Y][cell.X] = 255
+			}
+		}
+
 		aliveCells = calculateAliveCells(p, worldSlice)
 		mu.Unlock()
+
+		// send events for flipped cells
+		for _, cell := range flippedCells {
+			c.events <- CellFlipped{
+				CompletedTurns: currentTurn,
+				Cell:           cell,
+			}
+		}
 
 		mu.Lock()
 		if mustQuit {
