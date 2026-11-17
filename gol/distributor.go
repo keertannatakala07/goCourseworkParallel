@@ -8,6 +8,7 @@ import (
 	"uk.ac.bris.cs/gameoflife/util"
 )
 
+// holds the result of each workers strip and the start position and end position in the actual world
 type workerResult struct {
 	startY int
 	endY   int
@@ -29,6 +30,8 @@ func calculateNextState(p Params, startY int, endY int, world [][]byte, wg *sync
 	defer wg.Done()
 
 	stripHeight := endY - startY
+
+	//allocates the strip its own section in memory
 	strip := make([][]byte, stripHeight)
 	for i := range strip {
 		strip[i] = make([]byte, p.ImageWidth)
@@ -36,6 +39,8 @@ func calculateNextState(p Params, startY int, endY int, world [][]byte, wg *sync
 
 	for row := startY; row < endY; row++ {
 		stripRow := row - startY
+
+		//locks the pause variable pointer to check and waits until its changed via the cond wait
 		mu.Lock()
 		for *pause {
 			cond.Wait()
@@ -74,6 +79,7 @@ func calculateNextState(p Params, startY int, endY int, world [][]byte, wg *sync
 				}
 			}
 
+			//changes the particualr cell to the new value in the strip
 			strip[stripRow][column] = testChangeWorld
 
 			if world[row][column] != testChangeWorld {
@@ -84,6 +90,7 @@ func calculateNextState(p Params, startY int, endY int, world [][]byte, wg *sync
 			}
 		}
 	}
+	//via a buffered channel it send back the strip after all calculations are done
 	resultChan <- workerResult{
 		startY: startY,
 		endY:   endY,
@@ -286,6 +293,7 @@ func distributor(p Params, c distributorChannels) {
 
 		currentTurn := i + 1
 
+		//creates a resutl channel for the workers to return the strips and is buffered to the size of the amount of strips that will be returned
 		resultChan := make(chan workerResult, p.Threads)
 
 		for w := 0; w < p.Threads; w++ {
@@ -302,9 +310,12 @@ func distributor(p Params, c distributorChannels) {
 			startY = endY
 		}
 
+		//wait until all workers done and sent back work
 		wg.Wait()
+		//close the results channel
 		close(resultChan)
 
+		// go to through each strip in the results channel and allocate the corresponding strip section to the right place in the new world
 		newWorld := make([][]byte, p.ImageHeight)
 		for res := range resultChan {
 			for r := 0; r < (res.endY - res.startY); r++ {
