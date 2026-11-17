@@ -18,6 +18,7 @@ type distributorChannels struct {
 	keyPresses <-chan rune
 }
 
+// job for the worker pool to allocate jobs out
 type job struct {
 	startY      int
 	endY        int
@@ -29,6 +30,7 @@ type job struct {
 func calculateNextState(p Params, jobs <-chan job, results chan<- bool, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond, events chan<- Event) {
 
 	defer wg.Done()
+	//continually loops round waiting for a job to come through the channel, closes/ends when the channel is closed
 	for j := range jobs {
 		for row := j.startY; row < j.endY; row++ {
 
@@ -70,6 +72,7 @@ func calculateNextState(p Params, jobs <-chan job, results chan<- bool, wg *sync
 					}
 				}
 
+				//changes the job struct values (need to initialise every cell as the newWorld is empty inside the struct)
 				j.newWorld[row][column] = testChangeWorld
 
 				if j.world[row][column] != testChangeWorld {
@@ -80,6 +83,7 @@ func calculateNextState(p Params, jobs <-chan job, results chan<- bool, wg *sync
 				}
 			}
 		}
+		//sends back there are now results in the channelk
 		results <- true
 
 	}
@@ -278,6 +282,7 @@ func distributor(p Params, c distributorChannels) {
 	jobs := make(chan job, p.Threads)
 	results := make(chan bool, p.Threads)
 
+	//create pool of worker threads
 	for w := 0; w < p.Threads; w++ {
 
 		wg.Add(1)
@@ -294,6 +299,7 @@ func distributor(p Params, c distributorChannels) {
 			if w == p.Threads-1 {
 				endY = p.ImageHeight
 			}
+			//sends a job to the pool of workers to pull from
 			jobs <- job{
 				startY:      startY,
 				endY:        endY,
@@ -303,13 +309,14 @@ func distributor(p Params, c distributorChannels) {
 			}
 
 		}
-		//wait for all workers to say their results are done
+		//wait for all workers to say their results are done as the buffer is blocked until full as the loop will only continue once w amount of jobs have been done
 		for w := 0; w < p.Threads; w++ {
+			//blocking until result comes through
 			<-results
 		}
 
 		mu.Lock()
-		//pointer swap
+		//pointer swap so always write to the old memory address
 		worldSlice, newWorld = newWorld, worldSlice
 		completedTurns = i + 1
 		aliveCells = calculateAliveCells(p, worldSlice)
@@ -323,7 +330,7 @@ func distributor(p Params, c distributorChannels) {
 		mu.Unlock()
 		c.events <- TurnComplete{CompletedTurns: completedTurns}
 	}
-
+	//ends the workers loop and close them
 	close(jobs)
 	wg.Wait()
 	c.ioCommand <- ioOutput
