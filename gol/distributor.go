@@ -59,6 +59,7 @@ func calculateNextState(p Params, startY int, endY int, world [][]byte, wg *sync
 			}
 
 			if world[row][column] != testChangeWorld {
+				//send any cells that have changes down the channel
 				cellsChange <- util.Cell{X: column, Y: row}
 			}
 		}
@@ -243,6 +244,7 @@ func distributor(p Params, c distributorChannels) {
 
 	for i := 0; i < p.Turns; i++ {
 		currentTurn := i + 1
+		//make a channel to hold all the individual cell changes
 		cellsChange := make(chan util.Cell, 64)
 
 		for w := 0; w < p.Threads; w++ {
@@ -259,19 +261,19 @@ func distributor(p Params, c distributorChannels) {
 
 		}
 
-		//close channel to release blocking loop
+		//close channel to release blocking loop for the loop below (basically unlocks the loop below when all workers have done their cell changes)
 		go func() {
 			wg.Wait()
 			close(cellsChange)
 		}()
 
-		//add cells from buffer to a slice (blocking loop until the channel is closed)
+		//add cells from cellsChange channel to a slice (blocking loop until the channel is closed)
 		var flippedCells []util.Cell
 		for cell := range cellsChange {
 			flippedCells = append(flippedCells, cell)
 		}
 
-		//go through list and update relevant cells accordingly
+		//go through list and update relevant cells in the actual world accordingly
 		mu.Lock()
 		for _, cell := range flippedCells {
 			if worldSlice[cell.Y][cell.X] == 255 {
@@ -285,11 +287,9 @@ func distributor(p Params, c distributorChannels) {
 		mu.Unlock()
 
 		// send events for flipped cells
-		for _, cell := range flippedCells {
-			c.events <- CellFlipped{
-				CompletedTurns: currentTurn,
-				Cell:           cell,
-			}
+		c.events <- CellsFlipped{
+			CompletedTurns: currentTurn,
+			Cells:          flippedCells,
 		}
 
 		mu.Lock()
