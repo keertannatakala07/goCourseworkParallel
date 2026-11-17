@@ -127,9 +127,13 @@ func distributor(p Params, c distributorChannels) {
 
 	sectionSize := p.ImageHeight / p.Threads
 
+	//group for waiting for workers to finish
 	var wg sync.WaitGroup
+	//group for waiting for ticker and keyboard go routines to finish
 	var bg sync.WaitGroup
 	var mu sync.Mutex
+
+	//conditional lock to check for pausing for lock and unlocking
 	var cond = sync.NewCond(&mu)
 
 	mustQuit := false
@@ -139,18 +143,24 @@ func distributor(p Params, c distributorChannels) {
 	aliveCells := calculateAliveCells(p, worldSlice)
 
 	ticker := time.NewTicker(2 * time.Second)
+
+	//channel to end the go rountines
 	done := make(chan bool)
 
+	//ticker rountine
 	bg.Add(1)
 	go func() {
 		defer bg.Done()
 		for {
+			//select allows waiting without cpu usage
 			select {
 			case <-done:
+				//ends the rountine
 				return
 			case <-ticker.C:
 				mu.Lock()
 				for pause {
+					//waits here for the pause var to change
 					cond.Wait()
 				}
 				mu.Unlock()
@@ -165,6 +175,7 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}()
 
+	//keyboard rountine
 	bg.Add(1)
 	go func() {
 		defer bg.Done()
@@ -213,6 +224,7 @@ func distributor(p Params, c distributorChannels) {
 					}
 				} else if k == 'q' {
 					mu.Lock()
+					// broadcast to the the workers that the condition has been updated so they check the loop condition again
 					mustQuit = true
 					pause = false
 					cond.Broadcast()
@@ -269,7 +281,7 @@ func distributor(p Params, c distributorChannels) {
 			go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond, c.events, currentTurn)
 
 		}
-
+		// wait for all workers to finish
 		wg.Wait()
 
 		mu.Lock()
@@ -318,6 +330,7 @@ func distributor(p Params, c distributorChannels) {
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 	ticker.Stop()
 	close(done)
+	//wait for ticker and keyboard go rountines to finish.
 	bg.Wait()
 
 	close(c.events)
