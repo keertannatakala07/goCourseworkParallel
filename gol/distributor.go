@@ -217,17 +217,6 @@ func distributor(p Params, c distributorChannels) {
 					pause = false
 					cond.Broadcast()
 					mu.Unlock()
-
-					// mu.Lock()
-					// turns := completedTurns
-					// mu.Unlock()
-
-					// c.events <- StateChange{
-					// 	CompletedTurns: turns,
-					// 	NewState:       Quitting,
-					// }
-
-					// done <- true
 					return
 				} else if k == 'p' {
 					mu.Lock()
