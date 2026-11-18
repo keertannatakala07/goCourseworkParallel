@@ -272,9 +272,10 @@ func distributor(p Params, c distributorChannels) {
 					} else {
 						fmt.Println("Pausing the simulation. Press 'p' again to resume.")
 						pause = true
+						turns := completedTurns
 						mu.Unlock()
 						c.events <- StateChange{
-							CompletedTurns: completedTurns,
+							CompletedTurns: turns,
 							NewState:       Paused,
 						}
 					}
