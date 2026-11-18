@@ -120,10 +120,6 @@ func distributor(p Params, c distributorChannels) {
 	c.events <- StateChange{CompletedTurns: 0, NewState: Executing}
 
 	// TODO: Execute all turns of the Game of Life.
-	newWorld := make([][]byte, p.ImageHeight)
-	for i := range newWorld {
-		newWorld[i] = make([]byte, p.ImageWidth)
-	}
 
 	sectionSize := p.ImageHeight / p.Threads
 
@@ -266,6 +262,11 @@ func distributor(p Params, c distributorChannels) {
 	}()
 
 	for i := 0; i < p.Turns; i++ {
+		newWorld := make([][]byte, p.ImageHeight)
+		for i := range newWorld {
+			newWorld[i] = make([]byte, p.ImageWidth)
+		}
+
 		currentTurn := i + 1
 
 		for w := 0; w < p.Threads; w++ {
@@ -285,7 +286,7 @@ func distributor(p Params, c distributorChannels) {
 		wg.Wait()
 
 		mu.Lock()
-		worldSlice, newWorld = newWorld, worldSlice
+		worldSlice = newWorld
 		completedTurns = i + 1
 		aliveCells = calculateAliveCells(p, worldSlice)
 		mu.Unlock()
