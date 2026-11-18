@@ -18,74 +18,59 @@ type distributorChannels struct {
 	keyPresses <-chan rune
 }
 
-// job for the worker pool to allocate jobs out
-type job struct {
-	startY      int
-	endY        int
-	world       [][]byte
-	newWorld    [][]byte
-	currentTurn int
-}
-
-func calculateNextState(p Params, jobs <-chan job, results chan<- bool, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond, events chan<- Event) {
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond, events chan<- Event, currentTurn int) {
 
 	defer wg.Done()
-	//continually loops round waiting for a job to come through the channel, closes/ends when the channel is closed
-	for j := range jobs {
-		for row := j.startY; row < j.endY; row++ {
 
-			mu.Lock()
-			for *pause {
-				cond.Wait()
+	for row := startY; row < endY; row++ {
+
+		mu.Lock()
+		for *pause {
+			cond.Wait()
+		}
+		mu.Unlock()
+
+		for column := 0; column < p.ImageWidth; column++ {
+			liveCells := 0
+			for dr := -1; dr <= 1; dr++ {
+				for dc := -1; dc <= 1; dc++ {
+					if dr == 0 && dc == 0 {
+						continue
+					}
+					nRow := (row + dr + p.ImageHeight) % p.ImageHeight
+					nCol := (column + dc + p.ImageWidth) % p.ImageWidth
+					if world[nRow][nCol] == 255 {
+						liveCells++
+					}
+				}
 			}
-			mu.Unlock()
 
-			for column := 0; column < p.ImageWidth; column++ {
-				liveCells := 0
-				for dr := -1; dr <= 1; dr++ {
-					for dc := -1; dc <= 1; dc++ {
-						if dr == 0 && dc == 0 {
-							continue
-						}
-						nRow := (row + dr + p.ImageHeight) % p.ImageHeight
-						nCol := (column + dc + p.ImageWidth) % p.ImageWidth
-						if j.world[nRow][nCol] == 255 {
-							liveCells++
-						}
-					}
-				}
+			var testChangeWorld byte
 
-				var testChangeWorld byte
-
-				if j.world[row][column] == 255 {
-					if liveCells == 2 || liveCells == 3 {
-						testChangeWorld = 255
-					} else {
-						testChangeWorld = 0
-					}
+			if world[row][column] == 255 {
+				if liveCells == 2 || liveCells == 3 {
+					testChangeWorld = 255
 				} else {
-					if liveCells == 3 {
-						testChangeWorld = 255
-
-					} else {
-						testChangeWorld = 0
-					}
+					testChangeWorld = 0
 				}
+			} else {
+				if liveCells == 3 {
+					testChangeWorld = 255
 
-				//changes the job struct values (need to initialise every cell as the newWorld is empty inside the struct)
-				j.newWorld[row][column] = testChangeWorld
+				} else {
+					testChangeWorld = 0
+				}
+			}
 
-				if j.world[row][column] != testChangeWorld {
-					events <- CellFlipped{
-						CompletedTurns: j.currentTurn,
-						Cell:           util.Cell{X: column, Y: row},
-					}
+			newWorld[row][column] = testChangeWorld
+
+			if world[row][column] != testChangeWorld {
+				events <- CellFlipped{
+					CompletedTurns: currentTurn,
+					Cell:           util.Cell{X: column, Y: row},
 				}
 			}
 		}
-		//sends back there are now results in the channelk
-		results <- true
-
 	}
 }
 
@@ -142,9 +127,13 @@ func distributor(p Params, c distributorChannels) {
 
 	sectionSize := p.ImageHeight / p.Threads
 
+	//group for waiting for workers to finish
 	var wg sync.WaitGroup
+	//group for waiting for ticker and keyboard go routines to finish
 	var bg sync.WaitGroup
 	var mu sync.Mutex
+
+	//conditional lock to check for pausing for lock and unlocking
 	var cond = sync.NewCond(&mu)
 
 	mustQuit := false
@@ -154,18 +143,24 @@ func distributor(p Params, c distributorChannels) {
 	aliveCells := calculateAliveCells(p, worldSlice)
 
 	ticker := time.NewTicker(2 * time.Second)
+
+	//channel to end the go rountines
 	done := make(chan bool)
 
+	//ticker rountine
 	bg.Add(1)
 	go func() {
 		defer bg.Done()
 		for {
+			//select allows waiting without cpu usage
 			select {
 			case <-done:
+				//ends the rountine
 				return
 			case <-ticker.C:
 				mu.Lock()
 				for pause {
+					//waits here for the pause var to change
 					cond.Wait()
 				}
 				mu.Unlock()
@@ -180,6 +175,7 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}()
 
+	//keyboard rountine
 	bg.Add(1)
 	go func() {
 		defer bg.Done()
@@ -228,21 +224,11 @@ func distributor(p Params, c distributorChannels) {
 					}
 				} else if k == 'q' {
 					mu.Lock()
+					// broadcast to the the workers that the condition has been updated so they check the loop condition again
 					mustQuit = true
 					pause = false
 					cond.Broadcast()
 					mu.Unlock()
-
-					// mu.Lock()
-					// turns := completedTurns
-					// mu.Unlock()
-
-					// c.events <- StateChange{
-					// 	CompletedTurns: turns,
-					// 	NewState:       Quitting,
-					// }
-
-					// done <- true
 					return
 				} else if k == 'p' {
 					mu.Lock()
@@ -279,16 +265,6 @@ func distributor(p Params, c distributorChannels) {
 		}
 	}()
 
-	jobs := make(chan job, p.Threads)
-	results := make(chan bool, p.Threads)
-
-	//create pool of worker threads
-	for w := 0; w < p.Threads; w++ {
-
-		wg.Add(1)
-		go calculateNextState(p, jobs, results, &wg, &mu, &pause, cond, c.events)
-	}
-
 	for i := 0; i < p.Turns; i++ {
 		currentTurn := i + 1
 
@@ -299,24 +275,16 @@ func distributor(p Params, c distributorChannels) {
 			if w == p.Threads-1 {
 				endY = p.ImageHeight
 			}
-			//sends a job to the pool of workers to pull from
-			jobs <- job{
-				startY:      startY,
-				endY:        endY,
-				world:       worldSlice,
-				newWorld:    newWorld,
-				currentTurn: currentTurn,
-			}
+
+			wg.Add(1)
+
+			go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond, c.events, currentTurn)
 
 		}
-		//wait for all workers to say their results are done as the buffer is blocked until full as the loop will only continue once w amount of jobs have been done
-		for w := 0; w < p.Threads; w++ {
-			//blocking until result comes through
-			<-results
-		}
+		// wait for all workers to finish
+		wg.Wait()
 
 		mu.Lock()
-		//pointer swap so always write to the old memory address
 		worldSlice, newWorld = newWorld, worldSlice
 		completedTurns = i + 1
 		aliveCells = calculateAliveCells(p, worldSlice)
@@ -330,9 +298,6 @@ func distributor(p Params, c distributorChannels) {
 		mu.Unlock()
 		c.events <- TurnComplete{CompletedTurns: completedTurns}
 	}
-	//ends the workers loop and close them
-	close(jobs)
-	wg.Wait()
 	c.ioCommand <- ioOutput
 	var outputFilename string
 
@@ -365,6 +330,7 @@ func distributor(p Params, c distributorChannels) {
 	// Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
 	ticker.Stop()
 	close(done)
+	//wait for ticker and keyboard go rountines to finish.
 	bg.Wait()
 
 	close(c.events)
