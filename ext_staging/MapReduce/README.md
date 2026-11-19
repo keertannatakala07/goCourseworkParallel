@@ -1,0 +1,1 @@
+Splits the grid into chunks to process neighbor counts in parallel (Map) and merges the results (Reduce), rather than looping through cells sequentially on a single thread.
