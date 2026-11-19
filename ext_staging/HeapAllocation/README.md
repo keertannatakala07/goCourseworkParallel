@@ -1,1 +1,0 @@
-Allocates grid memory dynamically on the heap instead of the fixed-size stack so large grids don't overflow, keeping data alive until explicitly freed.
