@@ -1,0 +1,9674 @@
+Merged Copilot chats (duplicates removed)
+
+You said:
+wihtin go when i have a go routine dteecting keyboard presses how do i pasue the main loop when i find a certian key press what are teh strgeis theres channel blcoking but what other wya are there
+Copilot said:
+
+In Go, channels are usually the cleanest solution, but there are several strategies depending on what you mean by "pause the main loop".
+
+1. Block on a channel (idiomatic Go)
+
+Keyboard goroutine signals the main loop:
+
+Go
+pause := make(chan struct{})
+ 
+go func() {
+    for {
+        key := readKey()
+        if key == 'p' {
+            pause <- struct{}{}
+        }
+    }
+}()
+ 
+for {
+    <-pause // waits until signal arrives
+ 
+    fmt.Println("Paused")
+}
+
+Or toggle pause/resume:
+
+Go
+paused := false
+ 
+for {
+    select {
+    case <-pauseCh:
+        paused = !paused
+    default:
+    }
+ 
+    if paused {
+        time.Sleep(50 * time.Millisecond)
+        continue
+    }
+ 
+    // normal work
+}
+2. Shared atomic variable
+
+If the keyboard goroutine just needs to set a flag:
+
+Go
+var paused atomic.Bool
+ 
+go func() {
+    for {
+        if readKey() == 'p' {
+            paused.Store(true)
+        }
+    }
+}()
+ 
+for {
+    if paused.Load() {
+        continue
+    }
+ 
+    // work
+}
+
+Good for simple state sharing.
+
+3. Mutex + condition variable (sync.Cond)
+
+Useful when you want the main loop to sleep until resumed rather than busy-waiting.
+
+Go
+var mu sync.Mutex
+cond := sync.NewCond(&mu)
+ 
+paused := false
+ 
+go func() {
+    for {
+        key := readKey()
+ 
+        mu.Lock()
+        if key == 'p' {
+            paused = true
+        }
+        if key == 'r' {
+            paused = false
+            cond.Signal()
+        }
+        mu.Unlock()
+    }
+}()
+ 
+for {
+    mu.Lock()
+    for paused {
+        cond.Wait()
+    }
+    mu.Unlock()
+ 
+    // do work
+}
+
+This is essentially the Go equivalent of a pause/resume mechanism.
+
+4. Context cancellation
+
+If pausing actually means stopping and restarting work:
+
+Go
+ctx, cancel := context.WithCancel(context.Background())
+ 
+go worker(ctx)
+ 
+if key == 'q' {
+    cancel()
+}
+
+More for shutdown than pause.
+
+5. Semaphore pattern
+
+A buffered channel with capacity 1 can act like a pause lock:
+
+Go
+gate := make(chan struct{}, 1)
+gate <- struct{}{} // unlocked
+ 
+// main loop
+for {
+    <-gate
+    gate <- struct{}{}
+ 
+    // work
+}
+
+The keyboard goroutine can hold the token to block execution.
+
+What's most common?
+
+For a game loop, TUI, or interactive terminal program:
+
+Pause/resume state → atomic bool or mutex-protected bool.
+Wait until resumed → sync.Cond.
+One-off notifications → channels.
+Stop program → context.Context.
+
+If your keyboard handler is running in a goroutine and you want the main loop to truly freeze until another key is pressed, sync.Cond is often the best fit. If you just need a paused flag checked each iteration, an atomic.Bool is simplest.
+
+You said:
+basically when p is clicked it will pause or unpause depnsign on current pause stae
+Copilot said:
+
+For a simple toggle pause/unpause when p is pressed, I'd probably use an atomic boolean:
+
+Go
+var paused atomic.Bool
+ 
+go func() {
+    for {
+        key := readKey()
+ 
+        if key == 'p' {
+            paused.Store(!paused.Load())
+        }
+    }
+}()
+ 
+for {
+    if paused.Load() {
+        time.Sleep(50 * time.Millisecond)
+        continue
+    }
+ 
+    // main loop work here
+}
+
+If you want the main loop to completely stop consuming CPU while paused, use a channel or sync.Cond instead.
+
+Channel toggle example
+Go
+pauseCh := make(chan bool)
+ 
+go func() {
+    paused := false
+ 
+    for {
+        key := readKey()
+ 
+        if key == 'p' {
+            paused = !paused
+            pauseCh <- paused
+        }
+    }
+}()
+ 
+paused := false
+ 
+for {
+    select {
+    case paused = <-pauseCh:
+    default:
+    }
+ 
+    if paused {
+        time.Sleep(50 * time.Millisecond)
+        continue
+    }
+ 
+    // work
+}
+sync.Cond example (true pause)
+Go
+var (
+    paused bool
+    mu     sync.Mutex
+    cond   = sync.NewCond(&mu)
+)
+ 
+go func() {
+    for {
+        if readKey() == 'p' {
+            mu.Lock()
+            paused = !paused
+ 
+            if !paused {
+                cond.Signal() // wake main loop
+            }
+            mu.Unlock()
+        }
+    }
+}()
+ 
+for {
+    mu.Lock()
+    for paused {
+        cond.Wait()
+    }
+    mu.Unlock()
+ 
+    // work
+}
+
+A good rule of thumb:
+
+Just need a pause flag? → atomic.Bool
+Need to freeze until resumed? → sync.Cond
+Need event notifications between goroutines? → channels
+
+For a game loop or terminal app, I usually start with an atomic.Bool because it's dead simple and easy to reason about.
+
+You said:
+no my way of doing it owudl be use for loop that exits when the bool value of pause is changed by key press but this uses cpu what awya are there wihtout 100 percent cpu usage
+Copilot said:
+
+Ah, I see what you're asking. You don't want to spin in a loop checking paused, because that's effectively busy-waiting and wastes CPU.
+
+The usual approaches are:
+
+1. Block on a channel (most Go-like)
+Go
+resume := make(chan struct{})
+paused := false
+ 
+// keyboard goroutine
+go func() {
+    for {
+        key := readKey()
+ 
+        if key == 'p' {
+            if paused {
+                resume <- struct{}{}
+            }
+            paused = !paused
+        }
+    }
+}()
+ 
+for {
+    if paused {
+        <-resume // sleep here until resumed
+    }
+ 
+    // do work
+}
+
+The goroutine is literally asleep while paused.
+
+2. sync.Cond (classic pause/resume)
+Go
+var (
+    paused bool
+    mu     sync.Mutex
+    cond   = sync.NewCond(&mu)
+)
+ 
+func togglePause() {
+    mu.Lock()
+    paused = !paused
+ 
+    if !paused {
+        cond.Signal()
+    }
+    mu.Unlock()
+}
+ 
+for {
+    mu.Lock()
+    for paused {
+        cond.Wait()
+    }
+    mu.Unlock()
+ 
+    // work
+}
+
+cond.Wait() puts the goroutine to sleep with essentially zero CPU usage.
+
+3. Let the main loop receive keyboard events
+
+Sometimes the simplest solution is to avoid sharing state:
+
+Go
+for {
+    select {
+    case key := <-keyPresses:
+        if key == 'p' {
+            paused = !paused
+        }
+    default:
+        if !paused {
+            // work
+        }
+    }
+}
+Which would I use?
+
+If you're making a game, TUI, emulator, etc., where pressing P should pause and then pressing P again should resume, I'd usually use a channel or sync.Cond.
+
+A loop like:
+
+Go
+for paused {
+}
+
+is definitely something to avoid because it'll peg a CPU core at 100%. Blocking primitives (<-ch, cond.Wait(), mutexes, etc.) are designed specifically to put the goroutine to sleep until an event occurs.
+
+You said:
+no i want the main execution loop paused not the go routine
+Copilot said:
+
+Right, but the solution is the same.
+
+When you say "pause the main execution loop", you don't want:
+
+Go
+for paused {
+    // burns CPU
+}
+
+Instead, the main loop itself blocks until the keyboard goroutine wakes it up.
+
+Example:
+
+Go
+var (
+    paused = false
+    resume = make(chan struct{})
+)
+ 
+go func() {
+    for {
+        key := readKey()
+ 
+        if key == 'p' {
+            if paused {
+                paused = false
+                resume <- struct{}{} // wake main loop
+            } else {
+                paused = true
+            }
+        }
+    }
+}()
+ 
+for {
+    if paused {
+        <-resume // main loop sleeps here
+    }
+ 
+    // main work
+}
+
+The keyboard goroutine keeps running. The main loop stops at:
+
+Go
+<-resume
+
+which uses 0% CPU because the goroutine is blocked by the Go scheduler.
+
+You can think of channels, sync.Cond.Wait(), mutex locks, etc. as ways to put a goroutine to sleep rather than repeatedly checking a boolean.
+
+If all you have is a shared paused bool, there is no magic way for the main loop to know it changed without either:
+
+Polling (for paused {} or periodic checks), or
+Being notified via a synchronization primitive (channel, sync.Cond, semaphore, etc.).
+
+So for a pause/unpause keybind, the typical Go solution is:
+
+keyboard goroutine detects p
+sends a signal on a channel (or signals a sync.Cond)
+main loop blocks waiting for that signal when paused
+
+rather than trying to watch a boolean continuously.
+
+You said:
+difference between the go rontien blocking and the cond wiat and signal
+Copilot said:
+
+They're related, but there's a key difference in who is doing the blocking and how they get woken up.
+
+Blocking on a channel
+Go
+<-resume
+
+The goroutine stops and waits for someone to send:
+
+Go
+resume <- struct{}{}
+
+This is a direct one-to-one synchronization event.
+
+Think:
+
+"Don't continue until I receive a message."
+
+Waiting on a condition variable
+Go
+cond.Wait()
+
+This is usually paired with some shared state:
+
+Go
+for paused {
+    cond.Wait()
+}
+
+and then another goroutine changes the state and signals:
+
+Go
+paused = false
+cond.Signal()
+
+Think:
+
+"Don't continue while this condition is true."
+
+Why sync.Cond exists
+
+You could implement a pause/resume mechanism with channels:
+
+Go
+if paused {
+    <-resume
+}
+
+but once you have:
+
+multiple waiting goroutines
+shared state protected by a mutex
+need to wake one waiter (Signal)
+need to wake all waiters (Broadcast)
+
+sync.Cond becomes more natural.
+
+Example:
+
+Go
+mu.Lock()
+for paused {
+    cond.Wait()
+}
+mu.Unlock()
+
+When Wait() runs it:
+
+Unlocks mu
+Sleeps
+Gets signalled
+Re-locks mu
+Returns
+
+That's something channels don't do for you automatically.
+
+For your pause key
+
+If there is exactly one main loop that should pause and resume, I'd probably use a channel:
+
+Go
+pause := false
+resume := make(chan struct{})
+ 
+if pause {
+    <-resume
+}
+
+Simple and obvious.
+
+If you're already protecting state with a mutex:
+
+Go
+mu.Lock()
+for paused {
+    cond.Wait()
+}
+mu.Unlock()
+
+then sync.Cond fits better.
+
+A good rule:
+
+Channel = "an event happened."
+Cond = "wait until some shared state becomes true/false."
+
+Your pause flag is really shared state, so sync.Cond is arguably the more textbook solution, but many Go programmers would still reach for a channel because it's simpler.
+
+You said:
+so what sistuation woudl one use one or the other
+Copilot said:
+
+A useful mental model is:
+
+Channels are for events/messages.
+sync.Cond is for state changes.
+Use a channel when...
+
+Something happens and you want to notify another goroutine.
+
+Go
+pauseCh <- true
+Go
+<-pauseCh
+
+Examples:
+
+Key pressed
+HTTP request received
+Worker finished a job
+Timer expired
+
+The receiver doesn't necessarily care about shared state. It just cares that an event occurred.
+
+Use sync.Cond when...
+
+You have shared state and want to wait until that state satisfies some condition.
+
+Go
+for paused {
+    cond.Wait()
+}
+
+Example:
+
+Go
+var paused bool
+
+The main loop isn't interested in a "resume event". What it really wants is:
+
+"Wait while paused == true."
+
+That's exactly what condition variables are designed for.
+
+Go
+mu.Lock()
+for paused {
+    cond.Wait()
+}
+mu.Unlock()
+
+Then:
+
+Go
+mu.Lock()
+paused = false
+cond.Signal()
+mu.Unlock()
+Why not always use channels?
+
+Imagine multiple places can pause/unpause:
+
+Go
+paused = true
+paused = false
+paused = true
+paused = false
+
+With channels you're often inventing a protocol:
+
+Go
+pauseCh <- Pause
+pauseCh <- Resume
+
+and keeping state somewhere else anyway.
+
+With sync.Cond, the state is the source of truth:
+
+Go
+paused = true
+
+and waiters simply check that state.
+
+Practical rule
+
+For your specific case (press P to toggle pause):
+
+I'd probably choose sync.Cond because "paused" is a piece of shared state.
+
+Go
+for paused {
+    cond.Wait()
+}
+
+reads almost like English.
+
+For something like:
+
+Go
+key := <-keyPresses
+
+I'd use a channel because that's an event stream.
+
+So:
+
+Keyboard input arrives → channel
+Program should wait until paused becomes false → sync.Cond
+
+That's the distinction most Go programmers use.
+
+You said:
+so isntead of wiating or a channel we are watinig for a state change within a var
+Copilot said:
+
+Exactly.
+
+With a channel, you're waiting for an event:
+
+Go
+<-resumeCh
+
+Meaning:
+
+"Wake me up when someone sends a message."
+
+With sync.Cond, you're waiting for a condition on shared state:
+
+Go
+for paused {
+    cond.Wait()
+}
+
+Meaning:
+
+"Sleep while paused is true."
+
+The important thing is that cond.Wait() is not constantly checking the variable. It isn't polling.
+
+Internally it:
+
+Goes to sleep.
+Another goroutine changes state:
+Go
+paused = false
+That goroutine calls:
+Go
+cond.Signal()
+The sleeping goroutine wakes up and re-checks:
+Go
+for paused {
+    cond.Wait()
+}
+
+So you're still relying on a notification (Signal()), but the notification means:
+
+"The state may have changed, check again."
+
+rather than:
+
+"Here's an event/message."
+
+That's why you'll almost always see:
+
+Go
+for paused {
+    cond.Wait()
+}
+
+instead of:
+
+Go
+if paused {
+    cond.Wait()
+}
+
+because the signal doesn't guarantee the state is what you want, only that it's worth checking.
+
+A nice way to think about it:
+
+Channels	sync.Cond
+Wait for an event	Wait for a state
+"A key was pressed"	"paused == false"
+Data/message oriented	Shared-state oriented
+ch <- value	cond.Signal()
+
+For your pause example, the state-oriented version feels very natural:
+
+Go
+mu.Lock()
+for paused {
+    cond.Wait()
+}
+mu.Unlock()
+ 
+// continue game loop
+
+because the thing you're actually interested in is not the P key press, it's whether the program is currently paused or not.
+
+You said:
+what does wg.wait() do
+Copilot said:
+
+wg.Wait() is from Go's sync.WaitGroup.
+
+It blocks the current goroutine until all registered work is finished.
+
+Example:
+
+Go
+var wg sync.WaitGroup
+ 
+wg.Add(2)
+ 
+go func() {
+    defer wg.Done()
+    fmt.Println("Worker 1")
+}()
+ 
+go func() {
+    defer wg.Done()
+    fmt.Println("Worker 2")
+}()
+ 
+wg.Wait()
+ 
+fmt.Println("All workers finished")
+
+How it works:
+
+wg.Add(2) says "I'm waiting for 2 things."
+Each goroutine eventually calls wg.Done(), which is equivalent to:
+Go
+wg.Add(-1)
+When the internal counter reaches 0, any goroutine blocked in:
+Go
+wg.Wait()
+
+is released.
+
+A common use case is keeping main() alive:
+
+Go
+func main() {
+    var wg sync.WaitGroup
+ 
+    wg.Add(1)
+ 
+    go func() {
+        defer wg.Done()
+        doStuff()
+    }()
+ 
+    wg.Wait()
+}
+
+Without Wait(), main() might exit before the goroutine finishes.
+
+Compared to what we were discussing earlier:
+
+channel receive (<-ch) → wait for an event/message.
+cond.Wait() → wait for a state change.
+wg.Wait() → wait for a group of goroutines to finish.
+
+So WaitGroup is not really a pause/resume mechanism. It's more of a "don't continue until these N tasks are complete" mechanism.
+
+You said:
+if its wihin the main loop it blocks until all added in teh gorup are finished?
+Copilot said:
+
+Yes.
+
+If you do this inside your main loop:
+
+Go
+for {
+    // work
+ 
+    wg.Wait()
+ 
+    // more work
+}
+
+then when execution reaches:
+
+Go
+wg.Wait()
+
+the main goroutine stops there until the WaitGroup counter reaches zero.
+
+Example:
+
+Go
+var wg sync.WaitGroup
+ 
+for {
+    wg.Add(1)
+ 
+    go func() {
+        defer wg.Done()
+        time.Sleep(5 * time.Second)
+    }()
+ 
+    fmt.Println("Waiting...")
+    wg.Wait()
+    fmt.Println("Finished!")
+ 
+    break
+}
+
+Output:
+
+Plain Text
+Waiting...
+(5 second pause)
+Finished!
+
+The main goroutine is blocked during those 5 seconds.
+
+One important detail:
+
+Go
+wg.Wait()
+
+waits for everything currently counted in that WaitGroup, not just "things started this loop iteration".
+
+For example:
+
+Go
+wg.Add(2)
+ 
+go worker1(&wg)
+go worker2(&wg)
+ 
+wg.Wait()
+
+won't continue until both workers have called Done().
+
+Also, WaitGroup is usually for:
+
+"Wait until these goroutines finish."
+
+not
+
+"Pause until some condition changes."
+
+For a pause/unpause keybind:
+
+Go
+P -> pause
+P -> resume
+
+a WaitGroup is the wrong tool because goroutines only finish once. A WaitGroup counter can't be repeatedly decremented and incremented as a pause mechanism. Channels or sync.Cond are designed for that use case.
+
+You said:
+dont know whats happening the go run . is no logner working it get to input then nothign else is printed out depsite the code being the same
+Copilot said:
+
+If the code is unchanged, a few likely causes come to mind:
+
+1. Something is blocking after input
+
+For example:
+
+Go
+fmt.Println("before")
+input := <-inputCh
+fmt.Println("after")
+
+If "before" prints but "after" doesn't, then you're blocked waiting for input or waiting on a channel.
+
+Add logging everywhere:
+
+Go
+fmt.Println("A")
+...
+fmt.Println("B")
+...
+fmt.Println("C")
+
+to find the exact line where execution stops.
+
+2. Deadlock on a channel
+
+A common mistake:
+
+Go
+ch := make(chan string)
+ 
+ch <- "hello" // blocks forever if nobody receives
+
+or
+
+Go
+msg := <-ch // blocks forever if nobody sends
+
+If you're using pause/resume logic, I'd immediately suspect a channel send/receive mismatch.
+
+3. WaitGroup never reaches zero
+
+For example:
+
+Go
+wg.Add(1)
+ 
+go func() {
+    // forgot wg.Done()
+}()
+ 
+wg.Wait()
+
+The program appears frozen because Wait() is waiting forever.
+
+4. Mutex not unlocked
+Go
+mu.Lock()
+ 
+if something {
+    return // forgot mu.Unlock()
+}
+ 
+mu.Unlock()
+
+Every other goroutine that needs the mutex will hang.
+
+5. Keyboard input library is taking control
+
+If you're using something like:
+
+Go
+termbox
+tcell
+keyboard
+
+they may switch the terminal into raw mode and affect normal fmt.Println() behavior.
+
+Try:
+
+Go
+log.Println("here")
+
+instead of fmt.Println() since the log package writes to stderr.
+
+6. Goroutine isn't actually running
+
+A panic inside a goroutine can sometimes go unnoticed if you're focused on other output.
+
+Add:
+
+Go
+go func() {
+    defer func() {
+        if r := recover(); r != nil {
+            log.Println("panic:", r)
+        }
+    }()
+ 
+    // code
+}()
+7. Infinite wait due to pause logic
+
+Given our previous discussion, something like:
+
+Go
+for paused {
+}
+
+would use 100% CPU.
+
+But something like:
+
+Go
+for paused {
+    cond.Wait()
+}
+
+or
+
+Go
+<-resumeCh
+
+will appear to freeze if the resume signal never arrives.
+
+To diagnose quickly, show the section:
+
+where input is received
+where goroutines are started
+any channels
+any Wait(), Lock(), WaitGroup, or Cond usage
+
+and I can usually spot the exact blocking point immediately.
+
+You said:
+no nothing i being printed at allafter outptu depsite teh same code doing it 5 mins ago
+Copilot said:
+
+If absolutely nothing is being printed after some output, and the code genuinely hasn't changed, I'd check these in order:
+
+Is the program still running?
+
+Shell
+go run .
+
+Does the terminal return to the prompt, or does it hang?
+
+Add a print immediately after the input line
+
+Go
+fmt.Println("before input")
+fmt.Scanln(&input)
+fmt.Println("after input")
+
+If "after input" never appears, the input call is the issue.
+
+Check if stdout is being redirected or cleared If you're using a keyboard package (keyboard, termbox, tcell, etc.), it may have left the terminal in a weird state. Try:
+
+Go
+log.Println("test")
+
+instead of fmt.Println.
+
+Run with the race detector
+
+Shell
+go run -race .
+
+Sometimes a race condition suddenly becomes visible.
+
+Look for a deadlock Common examples:
+
+Go
+<-ch
+
+waiting forever,
+
+Go
+ch <- value
+
+with no receiver,
+
+or
+
+Go
+wg.Wait()
+
+when Done() is never called.
+
+Add tracing prints everywhere
+
+Go
+fmt.Println("1")
+fmt.Println("2")
+fmt.Println("3")
+
+Binary search the code until you find the last thing that's printed.
+
+Since you said it worked 5 minutes ago and now gets to input and then seemingly does nothing, my first suspicion would be:
+
+Scanln()/keyboard input isn't returning as expected,
+a goroutine is blocked on a channel,
+or the terminal is in raw mode because of a keyboard library.
+
+If you paste the section around the input handling and goroutines, I can probably identify the exact line that's blocking.
+
+You said:
+2026/11/04 14:18:47 [Main] Threads    8
+2026/11/04 14:18:47 [Main] Width      512
+2026/11/04 14:18:47 [Main] Height     512
+2026/11/04 14:18:47 [Main] Turns      10000000000
+2026/11/04 14:18:47 [IO] File 512x512.pgm input done
+ i get this then nothgin ahppens after when turns data should be printing out and it was before this
+Copilot said:
+
+Given that output:
+
+Plain Text
+[Main] Threads    8
+[Main] Width      512
+[Main] Height     512
+[Main] Turns      10000000000
+[IO] File 512x512.pgm input done
+
+it looks like the program has:
+
+Started successfully.
+Read the input file successfully.
+Then blocked immediately afterwards.
+
+Since you say it was printing turn data before, something after the input stage is likely waiting indefinitely.
+
+A few likely culprits:
+
+Stuck on a channel
+Go
+<-someChan
+
+or
+
+Go
+someChan <- value
+
+with no corresponding sender/receiver.
+
+Stuck on wg.Wait()
+Go
+wg.Add(1)
+ 
+// goroutine never calls Done()
+wg.Wait()
+
+This would look exactly like a freeze.
+
+Stuck on a mutex
+Go
+mu.Lock()
+// ...
+
+If another goroutine holds the lock forever.
+
+Goroutine never started
+
+For example:
+
+Go
+wg.Add(1)
+go worker()
+wg.Wait()
+
+but worker() exits before calling Done(), or panics.
+
+The quickest debugging trick:
+
+Immediately after
+
+Go
+log.Println("[IO] File ... input done")
+
+add:
+
+Go
+log.Println("A")
+
+Then keep adding:
+
+Go
+log.Println("B")
+log.Println("C")
+log.Println("D")
+
+through the next few lines.
+
+You're looking for:
+
+Plain Text
+input done
+A
+B
+
+but no C.
+
+That tells you the exact statement that's blocking.
+
+Also, if this is the coursework Game of Life implementation (the output looks very similar), check for something like:
+
+Go
+wg.Wait()
+
+after launching worker goroutines. If one worker isn't reaching:
+
+Go
+defer wg.Done()
+
+the entire simulation will appear frozen right after loading the image.
+
+Can you paste the code that executes immediately after:
+
+Go
+log.Println("[IO] File 512x512.pgm input done")
+
+and especially any WaitGroup, channel, or goroutine code? That's almost certainly where the blockage is.
+
+You said:
+this passes all tests
+
+
+Copilot said:
+
+Interesting. If
+
+Shell
+go test ./tests -v -run TestPgm
+
+passes, then:
+
+Your PGM I/O is probably fine.
+The freeze is likely in the actual simulation/runtime path, not the file loading path.
+The tests are probably not exercising the code path that hangs.
+
+From the log:
+
+Plain Text
+[IO] File 512x512.pgm input done
+
+is the last thing printed.
+
+That means the next statement after the I/O completion is either:
+
+hanging,
+blocked on a channel,
+blocked on Wait(),
+blocked on a mutex,
+or stuck in a goroutine initialization.
+
+I'd add logs like this:
+
+Go
+log.Println("1")
+// next line
+ 
+log.Println("2")
+// next line
+ 
+log.Println("3")
+
+immediately after the place where "input done" is logged.
+
+For example:
+
+Go
+log.Println("[IO] File input done")
+ 
+log.Println("A")
+initialiseWorkers()
+ 
+log.Println("B")
+runSimulation()
+ 
+log.Println("C")
+
+Then rerun.
+
+If you see:
+
+Plain Text
+input done
+A
+
+but not:
+
+Plain Text
+B
+
+you've identified the exact function that's hanging.
+
+Another useful trick:
+
+Shell
+go test ./tests -run TestPgm
+
+only proves the PGM tests pass.
+
+Try running the whole suite:
+
+Shell
+go test ./tests -v
+
+or whatever test should be exercising turn progression.
+
+Given you've recently been discussing goroutines, channels, and pause logic, my money would be on one of:
+
+Go
+<-ch
+
+waiting forever,
+
+Go
+wg.Wait()
+
+waiting for a missing Done(),
+
+or
+
+Go
+mu.Lock()
+
+waiting for a lock that's never released.
+
+Can you show the code immediately after the point where "input done" is logged? That's where the problem almost certainly is.
+
+You said:
+maybe its to do with the sdl things as that window isnt loading
+Copilot said:
+
+Yes, that's quite plausible.
+
+If the SDL window isn't appearing, then your program may be blocked in SDL initialization or event handling before it reaches the code that prints turn updates.
+
+A few things to check:
+
+Is SDL initialization succeeding?
+
+Add logging around it:
+
+Go
+log.Println("Before SDL Init")
+ 
+err := sdl.Init(sdl.INIT_VIDEO)
+if err != nil {
+    log.Fatal(err)
+}
+ 
+log.Println("After SDL Init")
+
+If "After SDL Init" never appears, you've found the culprit.
+
+Is the SDL event loop running on the main OS thread?
+
+SDL often expects window creation and event processing on the main thread. Many Go SDL examples start with:
+
+Go
+runtime.LockOSThread()
+
+in main().
+
+If you've recently moved SDL code into a goroutine, that can cause odd behaviour.
+
+Is the window goroutine blocked?
+
+If you have something like:
+
+Go
+go RunSDL()
+
+and then:
+
+Go
+wg.Wait()
+
+check that RunSDL() actually starts and doesn't immediately block.
+
+Add:
+
+Go
+log.Println("SDL goroutine started")
+
+as the first line.
+
+Is SDL waiting for events?
+
+Sometimes code like:
+
+Go
+for {
+    event := sdl.WaitEvent()
+    ...
+}
+
+looks frozen because it's intentionally blocking until an event occurs.
+
+Try logging before and after the call:
+
+Go
+log.Println("Waiting event")
+event := sdl.WaitEvent()
+log.Println("Got event", event)
+Since you said:
+Plain Text
+[IO] File 512x512.pgm input done
+
+is the last output, I'd search for whatever function is called immediately after loading the PGM. If that's where the SDL window is normally created, then the issue is very likely in:
+
+sdl.Init(...)
+window creation
+renderer creation
+launching the SDL goroutine
+a WaitGroup waiting for the SDL goroutine to signal ready
+
+A common pattern that deadlocks is:
+
+Go
+wg.Add(1)
+ 
+go startSDL(&wg)
+ 
+wg.Wait()
+
+but startSDL() never reaches:
+
+Go
+wg.Done()
+
+because it gets stuck creating the window.
+
+The next thing I'd do is add logs around every SDL call and see which is the last one printed. That will pinpoint the exact function that's hanging.
+
+You said:
+package sdl
+
+
+
+import (
+    "log"
+    "time"
+
+
+
+    "github.com/veandco/go-sdl2/sdl"
+    "uk.ac.bris.cs/gameoflife/gol"
+
+
+    "uk.ac.bris.cs/gameoflife/util"
+)
+
+
+
+const FPS = 60
+
+
+
+func Run(p gol.Params, events <-chan gol.Event, keyPresses chan<- rune) {
+    w := NewWindow(int32(p.ImageWidth), int32(p.ImageHeight))
+    defer w.Destroy()
+    dirty := false
+    refreshTicker := time.NewTicker(time.Second / time.Duration(FPS))
+    avgTurns := util.NewAvgTurns()
+
+
+
+sdl:
+    for {
+        select {
+        case <-refreshTicker.C:
+            event := w.PollEvent()
+            if event != nil {
+                switch e := event.(type) {
+                case *sdl.QuitEvent:
+                    keyPresses <- 'q'
+                case *sdl.KeyboardEvent:
+                    switch e.Keysym.Sym {
+                    case sdl.K_ESCAPE:
+                        keyPresses <- 'q'
+                    case sdl.K_p:
+                        keyPresses <- 'p'
+                    case sdl.K_s:
+                        keyPresses <- 's'
+                    case sdl.K_q:
+                        keyPresses <- 'q'
+                    case sdl.K_k:
+                        keyPresses <- 'k'
+                    }
+                }
+            }
+            if dirty {
+                w.RenderFrame()
+                dirty = false
+            }
+
+
+
+        case event, ok := <-events:
+            if !ok {
+                break sdl
+            }
+            switch e := event.(type) {
+            case gol.CellFlipped:
+                w.FlipPixel(e.Cell.X, e.Cell.Y)
+            case gol.CellsFlipped:
+                for _, cell := range e.Cells {
+                    w.FlipPixel(cell.X, cell.Y)
+                }
+            case gol.TurnComplete:
+                dirty = true
+            case gol.AliveCellsCount:
+                log.Printf(
+                    "[Event] Completed Turns %-8v %-20v Avg%+5v turns/sec\n",
+                    event.GetCompletedTurns(),
+                    event,
+                    avgTurns.TurnsPerSec(event.GetCompletedTurns()),
+                )
+            case gol.FinalTurnComplete:
+                log.Printf("[Event] Completed Turns %-8v %v\n", event.GetCompletedTurns(), event)
+            case gol.ImageOutputComplete:
+                log.Printf("[Event] Completed Turns %-8v %v\n", event.GetCompletedTurns(), event)
+            case gol.StateChange:
+                log.Printf("[Event] Completed Turns %-8v %v\n", event.GetCompletedTurns(), event)
+                if e.NewState == gol.Quitting {
+                    break sdl
+                }
+            }
+        }
+    }
+}
+
+
+
+func RunHeadless(events <-chan gol.Event) {
+    avgTurns := util.NewAvgTurns()
+    for event := range events {
+        switch e := event.(type) {
+        case gol.AliveCellsCount:
+            log.Printf(
+                "[Event] Completed Turns %-8v %-20v Avg%+5v turns/sec\n",
+                event.GetCompletedTurns(),
+                event,
+                avgTurns.TurnsPerSec(event.GetCompletedTurns()),
+            )
+        case gol.FinalTurnComplete:
+            log.Printf("[Event] Completed Turns %-8v %v\n", event.GetCompletedTurns(), "Final Turn Complete")
+        case gol.ImageOutputComplete:
+            log.Printf("[Event] Completed Turns %-8v %v\n", event.GetCompletedTurns(), event)
+        case gol.StateChange:
+            log.Printf("[Event] Completed Turns %-8v %v\n", event.GetCompletedTurns(), event)
+            if e.NewState == gol.Quitting {
+                break
+            }
+        }
+    }
+}
+package sdl
+
+
+
+import (
+    "fmt"
+    "unsafe"
+
+
+
+    "github.com/veandco/go-sdl2/sdl"
+    "uk.ac.bris.cs/gameoflife/util"
+)
+
+
+
+type Window struct {
+    Width, Height int32
+    window        *sdl.Window
+    renderer      *sdl.Renderer
+    texture       *sdl.Texture
+    pixels        []byte
+}
+
+
+
+func filterEvent(e sdl.Event, userdata interface{}) bool {
+    return e.GetType() == sdl.KEYDOWN || e.GetType() == sdl.QUIT
+}
+
+
+
+func NewWindow(width, height int32) *Window {
+    err := sdl.Init(sdl.INIT_EVERYTHING)
+    util.Check(err)
+    window, err := sdl.CreateWindow(
+        "GOL GUI",
+        sdl.WINDOWPOS_CENTERED,
+        sdl.WINDOWPOS_CENTERED,
+        width,
+        height,
+        sdl.WINDOW_SHOWN,
+    )
+    util.Check(err)
+    renderer, err := sdl.CreateRenderer(window, -1, sdl.WINDOW_SHOWN)
+    util.Check(err)
+    sdl.SetHint(sdl.HINT_RENDER_SCALE_QUALITY, "linear")
+    err = renderer.SetLogicalSize(width, height)
+    util.Check(err)
+    texture, err := renderer.CreateTexture(
+        sdl.PIXELFORMAT_ARGB8888,
+        sdl.TEXTUREACCESS_STATIC,
+        width,
+        height,
+    )
+    util.Check(err)
+
+
+
+    sdl.SetEventFilterFunc(filterEvent, nil)
+    return &Window{
+        width,
+        height,
+        window,
+        renderer,
+        texture,
+        make([]byte, width*height*4),
+    }
+}
+
+
+
+func (w *Window) Destroy() {
+    err := w.texture.Destroy()
+    util.Check(err)
+    err = w.renderer.Destroy()
+    util.Check(err)
+    err = w.window.Destroy()
+    util.Check(err)
+    sdl.Quit()
+}
+
+
+
+func (w *Window) RenderFrame() {
+    err := w.texture.Update(nil, unsafe.Pointer(&w.pixels[0]), int(w.Width*4))
+    util.Check(err)
+    err = w.renderer.Clear()
+    util.Check(err)
+    err = w.renderer.Copy(w.texture, nil, nil)
+    util.Check(err)
+    w.renderer.Present()
+}
+
+
+
+func (w *Window) PollEvent() sdl.Event {
+    return sdl.PollEvent()
+}
+
+
+
+func (w *Window) SetPixel(x, y int) {
+    width := int(w.Width)
+    w.pixels[4*(y*width+x)+0] = 0xFF
+    w.pixels[4*(y*width+x)+1] = 0xFF
+    w.pixels[4*(y*width+x)+2] = 0xFF
+    w.pixels[4*(y*width+x)+3] = 0xFF
+}
+
+
+
+func (w *Window) FlipPixel(x, y int) {
+    if x < 0 || y < 0 || x >= int(w.Width) || y >= int(w.Height) {
+        panic(fmt.Sprintf(
+            "CellFlipped event at (%d, %d) is outside the bounds of the window.",
+            x,
+            y,
+        ))
+    }
+
+
+
+    width := int(w.Width)
+    w.pixels[4*(y*width+x)+0] = ^w.pixels[4*(y*width+x)+0]
+    w.pixels[4*(y*width+x)+1] = ^w.pixels[4*(y*width+x)+1]
+    w.pixels[4*(y*width+x)+2] = ^w.pixels[4*(y*width+x)+2]
+    w.pixels[4*(y*width+x)+3] = ^w.pixels[4*(y*width+x)+3]
+}
+
+
+
+func (w *Window) CountPixels() int {
+    count := 0
+    for i := 0; i < int(w.Width)*int(w.Height)*4; i += 4 {
+        if w.pixels[i] == 0xFF {
+            count++
+        }
+    }
+    return count
+}
+
+
+
+func (w *Window) ClearPixels() {
+    for i := range w.pixels {
+        w.pixels[i] = 0
+    }
+}
+Copilot said:
+
+Nothing in that SDL code jumps out as obviously wrong, but one detail from your symptoms does:
+
+[IO] File 512x512.pgm input done
+
+then no turn output
+
+and the SDL window never appears
+
+That suggests Run() may never be reached, or it's hanging in NewWindow().
+
+I'd instrument NewWindow() like this:
+
+Go
+func NewWindow(width, height int32) *Window {
+    log.Println("SDL 1")
+ 
+    err := sdl.Init(sdl.INIT_EVERYTHING)
+    util.Check(err)
+ 
+    log.Println("SDL 2")
+ 
+    window, err := sdl.CreateWindow(
+        "GOL GUI",
+        sdl.WINDOWPOS_CENTERED,
+        sdl.WINDOWPOS_CENTERED,
+        width,
+        height,
+        sdl.WINDOW_SHOWN,
+    )
+    util.Check(err)
+ 
+    log.Println("SDL 3")
+ 
+    renderer, err := sdl.CreateRenderer(window, -1, sdl.WINDOW_SHOWN)
+    util.Check(err)
+ 
+    log.Println("SDL 4")
+
+and at the start of Run():
+
+Go
+func Run(...) {
+    log.Println("ENTERED SDL RUN")
+    w := NewWindow(...)
+
+Then run again.
+
+Another thing I'd check
+
+If you're on the Bristol GoL coursework, SDL usually needs to run on the main OS thread.
+
+Check whether you recently moved the SDL call into a goroutine:
+
+Go
+go sdl.Run(...)
+
+instead of:
+
+Go
+sdl.Run(...)
+
+or whether a runtime.LockOSThread() disappeared.
+
+More likely than SDL
+
+The fact that you don't even get:
+
+Plain Text
+[Event] Completed Turns ...
+
+makes me wonder if the simulation goroutine isn't sending events anymore.
+
+For example, if Run() contains:
+
+Go
+case event, ok := <-events:
+
+and nothing is ever sent into events, you'll see exactly what you're describing:
+
+input file loaded
+SDL loop waiting
+no event logs
+no turns progressing
+
+Check where events <- ... is performed in your simulation code.
+
+I'd specifically add:
+
+Go
+log.Println("sending turn complete")
+events <- TurnComplete{...}
+
+and
+
+Go
+log.Println("starting distributor")
+
+around the distributor/simulation startup.
+
+My current ranking would be:
+
+Simulation/distributor goroutine never starts ⭐
+events channel never receives anything ⭐
+SDL stuck during window creation
+WaitGroup deadlock before simulation begins
+
+Can you show the code that creates:
+
+Go
+events := make(chan gol.Event)
+
+and launches both the simulation and sdl.Run()? That's probably where the issue is.
+
+You said:
+2026/11/04 14:24:26 [Main] Threads    8
+2026/11/04 14:24:26 [Main] Width      512
+2026/11/04 14:24:26 [Main] Height     512
+2026/11/04 14:24:26 [Main] Turns      10000000000
+SDL 1
+2026/11/04 14:24:26 [IO] File 512x512.pgm input done
+SDL 2
+Copilot said:
+
+That's a very strong clue.
+
+You get:
+
+Plain Text
+SDL 1
+[IO] File 512x512.pgm input done
+SDL 2
+
+but not SDL 3.
+
+That means you're hanging specifically at:
+
+Go
+window, err := sdl.CreateWindow(
+    ...
+)
+
+because:
+
+Go
+SDL 1
+sdl.Init(...)
+SDL 2
+sdl.CreateWindow(...)  // <- stuck here
+SDL 3
+
+and SDL 3 never appears.
+
+A few likely causes:
+
+1. SDL is not running on the main OS thread
+
+This is the most common issue I see with Go + SDL.
+
+Check whether you've recently changed something like:
+
+Go
+go sdl.Run(...)
+
+instead of:
+
+Go
+sdl.Run(...)
+
+SDL window creation should generally happen on the main thread.
+
+Many SDL Go projects have:
+
+Go
+func main() {
+    runtime.LockOSThread()
+    ...
+}
+
+before any SDL calls.
+
+2. Running over SSH / WSL / remote terminal
+
+If the display server isn't accessible, window creation can fail or hang.
+
+Check:
+
+Shell
+echo $DISPLAY
+
+If you're on Linux.
+
+3. Check whether SDL is actually returning an error
+
+Replace:
+
+Go
+util.Check(err)
+
+with:
+
+Go
+if err != nil {
+    log.Fatalf("CreateWindow failed: %v", err)
+}
+
+just to be sure the error isn't getting swallowed somehow.
+
+4. Check whether another SDL window instance is stuck
+
+Sometimes a previous run crashed and SDL gets into a weird state.
+
+Try:
+
+Shell
+pkill -f gol
+
+or restart the terminal.
+
+5. Bristol Game of Life specific suspicion
+
+If you're on the coursework and recently added goroutines for keyboard handling, pause logic, or distributors, I'd immediately check where Run() is launched.
+
+If you have:
+
+Go
+go sdl.Run(...)
+
+I'd try changing it temporarily to:
+
+Go
+sdl.Run(...)
+
+just for testing.
+
+The evidence currently points very strongly to:
+
+Go
+sdl.CreateWindow(...)
+
+blocking, not your simulation code.
+
+Can you show the code that calls:
+
+Go
+sdl.Run(...)
+
+(or RunHeadless(...)) from main? That's likely where the root cause is.
+
+You said:
+package main
+
+
+
+import (
+    "flag"
+    "log"
+    "os"
+    "os/signal"
+    "runtime"
+    "sync/atomic"
+    "syscall"
+    "time"
+
+
+
+    "uk.ac.bris.cs/gameoflife/gol"
+    "uk.ac.bris.cs/gameoflife/sdl"
+    "uk.ac.bris.cs/gameoflife/util"
+)
+
+
+
+// main is the function called when starting Game of Life with 'go run .'
+func main() {
+    runtime.LockOSThread()
+    var params gol.Params
+
+
+
+    flag.IntVar(
+        ¶ms.Threads,
+        "t",
+        8,
+        "Specify the number of worker threads to use. Defaults to 8.")
+
+
+
+    flag.IntVar(
+        ¶ms.ImageWidth,
+        "w",
+        512,
+        "Specify the width of the image. Defaults to 512.")
+
+
+
+    flag.IntVar(
+        ¶ms.ImageHeight,
+        "h",
+        512,
+        "Specify the height of the image. Defaults to 512.")
+
+
+
+    flag.IntVar(
+        ¶ms.Turns,
+        "turns",
+        10000000000,
+        "Specify the number of turns to process. Defaults to 10000000000.")
+
+
+
+    headless := flag.Bool(
+        "headless",
+        false,
+        "Disable the SDL window for running in a headless environment.")
+
+
+
+    flag.Parse()
+
+
+
+    log.Printf("[Main] %-10v %v", "Threads", params.Threads)
+    log.Printf("[Main] %-10v %v", "Width", params.ImageWidth)
+    log.Printf("[Main] %-10v %v", "Height", params.ImageHeight)
+    log.Printf("[Main] %-10v %v", "Turns", params.Turns)
+
+
+
+    keyPresses := make(chan rune, 10)
+    events := make(chan gol.Event, 1000)
+
+
+
+    go sigint()
+
+
+
+    go gol.Run(params, events, keyPresses)
+    if !*headless {
+        sdl.Run(params, events, keyPresses)
+    } else {
+        sdl.RunHeadless(events)
+    }
+}
+
+
+
+func sigint() {
+    sigint := make(chan os.Signal, 1)
+    signal.Notify(sigint, syscall.SIGINT, syscall.SIGTERM)
+    var exit atomic.Bool
+    for range sigint {
+        if exit.Load() {
+            log.Printf("[Main] %v Force quit by the user", util.Yellow("WARN"))
+            os.Exit(0)
+        } else {
+            log.Printf("[Main] %v Press Ctrl+C again to force quit", util.Yellow("WARN"))
+            exit.Store(true)
+            go func() {
+                time.Sleep(4 * time.Second)
+                exit.Store(false)
+            }()
+        }
+    }
+}
+Copilot said:
+
+The main thing I notice is:
+
+Go
+runtime.LockOSThread()
+ 
+go gol.Run(params, events, keyPresses)
+ 
+if !*headless {
+    sdl.Run(params, events, keyPresses)
+}
+
+and your logs show:
+
+Plain Text
+SDL 1
+[IO] File 512x512.pgm input done
+SDL 2
+
+which means:
+
+Go
+sdl.Init(...)
+
+returns successfully, but:
+
+Go
+sdl.CreateWindow(...)
+
+never returns.
+
+Since runtime.LockOSThread() is present, the next thing I'd suspect is that the thread is blocked by another SDL/OpenGL/X11 issue rather than your simulation.
+
+Try adding:
+
+Go
+log.Println("creating window")
+window, err := sdl.CreateWindow(...)
+log.Printf("window=%v err=%v", window, err)
+
+instead of relying on util.Check(err).
+
+Also check whether you're actually getting a panic from util.Check:
+
+Go
+func Check(err error) {
+    if err != nil {
+        panic(err)
+    }
+}
+
+because if you've redirected output or the panic occurs on another goroutine, you may not be noticing it.
+
+A very useful test:
+
+Shell
+go run . -headless
+
+If the simulation immediately starts printing:
+
+Plain Text
+[Event] Completed Turns ...
+
+then you've proven the distributor/simulation is fine and the problem is 100% inside SDL window creation.
+
+If it still hangs in headless mode, the issue is elsewhere.
+
+I'd also add:
+
+Go
+log.Println("starting gol.Run")
+go gol.Run(params, events, keyPresses)
+ 
+log.Println("starting SDL")
+sdl.Run(params, events, keyPresses)
+
+and inside gol.Run:
+
+Go
+func Run(...) {
+    log.Println("gol.Run entered")
+
+to verify the simulation goroutine is actually starting.
+
+My current confidence is:
+
+gol.Run is probably running and loading the PGM successfully.
+The program is hanging specifically at sdl.CreateWindow(...).
+Running with -headless will likely work and confirm that.
+
+Try:
+
+Shell
+go run . -headless
+
+and tell me whether turn events start printing. That result will narrow it down immediately.
+
+You said:
+yes sdl is the issue, headless works
+Copilot said:
+
+Great, that narrows it down a lot.
+
+If -headless works and SDL hangs at:
+
+Go
+window, err := sdl.CreateWindow(...)
+
+then your Game of Life code is probably fine. The issue is environmental or SDL-specific.
+
+A few things I'd try:
+
+Check SDL error output
+
+Replace temporarily:
+
+Go
+util.Check(err)
+
+with:
+
+Go
+if err != nil {
+    log.Fatalf("CreateWindow failed: %v", err)
+}
+
+Sometimes SDL gives a useful message instead of silently appearing stuck.
+
+Check if you're running in WSL
+
+If you're on WSL:
+
+Shell
+echo $DISPLAY
+
+should have a value.
+
+SDL window creation often fails when there's no display server available.
+
+Check if another SDL process is hung
+Shell
+ps aux | grep gol
+
+or
+
+Shell
+pkill -f gol
+
+Then rerun.
+
+Try a tiny SDL test
+Go
+package main
+ 
+import (
+    "log"
+    "github.com/veandco/go-sdl2/sdl"
+)
+ 
+func main() {
+    if err := sdl.Init(sdl.INIT_VIDEO); err != nil {
+        log.Fatal(err)
+    }
+    defer sdl.Quit()
+ 
+    w, err := sdl.CreateWindow(
+        "test",
+        sdl.WINDOWPOS_CENTERED,
+        sdl.WINDOWPOS_CENTERED,
+        100,
+        100,
+        sdl.WINDOW_SHOWN,
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer w.Destroy()
+ 
+    select {}
+}
+
+If this also hangs, it's definitely not your coursework code.
+
+One suspicious thing
+
+You're using:
+
+Go
+renderer, err := sdl.CreateRenderer(window, -1, sdl.WINDOW_SHOWN)
+
+But the third parameter is renderer flags, not window flags.
+
+Normally you'd see:
+
+Go
+renderer, err := sdl.CreateRenderer(window, -1, sdl.RENDERER_ACCELERATED)
+
+or
+
+Go
+renderer, err := sdl.CreateRenderer(window, -1, 0)
+
+It's probably unrelated since you're not reaching that line, but worth correcting.
+
+Most likely cause
+
+Given:
+
+Plain Text
+SDL 1
+[IO] File 512x512.pgm input done
+SDL 2
+
+and -headless works,
+
+the problem is almost certainly one of:
+
+No GUI/display environment available.
+SDL installation/runtime issue.
+Creating the window from an environment SDL doesn't like (WSL, remote terminal, SSH, etc.).
+A stale SDL/X11/Wayland session.
+
+What OS/environment are you running in? Native Linux, macOS, Windows, or WSL? That would make the next debugging step much clearer.
+
+You said:
+ps aux | grep gol
+eneylon+  132234  0.0  0.0   4096  2048 pts/10   S+   14:28   0:00 grep --color=auto gol
+Copilot said:
+
+That output means there isn't a stuck Game of Life process running:
+
+Plain Text
+eneylon+ 132234 ... grep --color=auto gol
+
+The only process found is the grep command itself.
+
+So we can rule out:
+
+old GoL processes hanging around
+zombie SDL windows from a previous run
+multiple copies fighting over SDL
+
+Given what you've established:
+
+✅ PGM loading works
+✅ gol.Run() works (-headless runs)
+✅ sdl.Init() succeeds (SDL 2 printed)
+✅ Hang occurs in sdl.CreateWindow()
+✅ No existing GoL process
+
+I'd check the display environment next:
+
+Shell
+echo $DISPLAY
+echo $XDG_SESSION_TYPE
+
+and tell me the output.
+
+Also try:
+
+Shell
+glxinfo | head
+
+(if installed)
+
+and:
+
+Shell
+sdl2-config --version
+
+If you're on Linux, another quick test is:
+
+Shell
+echo $DISPLAY
+xeyes
+
+or
+
+Shell
+xclock
+
+If those GUI programs don't open, SDL won't be able to create a window either.
+
+One other possibility: if you're using the university lab environment, SSH, VS Code Remote, WSL, or a container, SDL can suddenly stop working if the display forwarding disappears, while headless mode continues to work perfectly. The symptoms are very similar to what you're seeing.
+
+The fact that sdl.Init() succeeds but CreateWindow() never returns makes me suspect a display/graphics issue more than a bug in your Go code.
+
+You said:
+where woudl i put it when claclting the next state ?
+Copilot said:
+
+For Game of Life, I'd usually put the pause check at the start of each turn, not inside the cell-calculation loops.
+
+For example:
+
+Go
+for turn := 0; turn < p.Turns; turn++ {
+ 
+    pauseMu.Lock()
+    for paused {
+        pauseCond.Wait()
+    }
+    pauseMu.Unlock()
+ 
+    calculateNextState()
+}
+
+This means:
+
+Finish the current turn.
+Pause before starting the next turn.
+Resume cleanly.
+
+If you're using worker goroutines:
+
+Go
+func worker(...) {
+    for job := range jobs {
+ 
+        pauseMu.Lock()
+        for paused {
+            pauseCond.Wait()
+        }
+        pauseMu.Unlock()
+ 
+        processRows(job)
+    }
+}
+
+This pauses workers before they start processing a chunk of work.
+
+Where not to put it
+
+Don't do this:
+
+Go
+for y := 0; y < height; y++ {
+    pauseMu.Lock()
+    for paused {
+        pauseCond.Wait()
+    }
+    pauseMu.Unlock()
+ 
+    for x := 0; x < width; x++ {
+        ...
+    }
+}
+
+or worse:
+
+Go
+for x := 0; x < width; x++ {
+    pauseMu.Lock()
+    ...
+}
+
+because you're constantly locking and unlocking while calculating, which hurts performance.
+
+A good rule:
+
+Pause at natural synchronization points.
+
+For Game of Life those are usually:
+
+Before starting a turn.
+Before a worker starts a new job/chunk.
+Before sending the next generation's work.
+
+Not for every cell calculation. That would be far too frequent.
+
+You said:
+but calculte next stae is a go rountine
+Copilot said:
+
+Ah, that changes things.
+
+If calculateNextState() is running in its own goroutine, then pausing the distributor/main loop won't stop it.
+
+For example:
+
+Go
+go calculateNextState()
+
+Once that goroutine starts, it runs independently.
+
+If you do:
+
+Go
+paused = true
+
+in the main goroutine, calculateNextState() doesn't magically stop. It will continue until it reaches a pause check itself.
+
+Example
+Go
+func calculateNextState() {
+    // starts running
+ 
+    doLotsOfWork()
+ 
+    // finishes
+}
+
+If doLotsOfWork() takes 2 seconds and you press p halfway through, it will still finish those 2 seconds unless it checks for being paused.
+
+So where should the pause check go?
+
+At the start of work performed by the goroutine:
+
+Go
+func calculateNextState() {
+    pauseMu.Lock()
+    for paused {
+        pauseCond.Wait()
+    }
+    pauseMu.Unlock()
+ 
+    doLotsOfWork()
+}
+
+or, more realistically for GoL workers:
+
+Go
+func worker() {
+    for job := range jobs {
+ 
+        pauseMu.Lock()
+        for paused {
+            pauseCond.Wait()
+        }
+        pauseMu.Unlock()
+ 
+        processRows(job)
+    }
+}
+Important question
+
+How is calculateNextState() used?
+
+Is it:
+
+Go
+go calculateNextState()
+
+once per turn?
+
+Or do you have:
+
+Go
+for i := 0; i < p.Threads; i++ {
+    go worker(...)
+}
+
+with worker goroutines consuming jobs?
+
+For the Bristol coursework, it's usually the second pattern. In that case I'd put the pause check in the worker loop before processing a job/chunk. That way all 8 workers stop when paused and Broadcast() wakes them all when resumed.
+
+You said:
+but why are the start the pause will onl happen at the end of the next state calcultion or the next one?
+Copilot said:
+
+Exactly. That's the tradeoff.
+
+If you only check:
+
+Go
+pauseMu.Lock()
+for paused {
+    pauseCond.Wait()
+}
+pauseMu.Unlock()
+ 
+calculateNextState()
+
+then:
+
+Press p while calculateNextState() is running.
+It won't stop immediately.
+It finishes the current calculation.
+Then it hits the pause check before the next iteration.
+
+This is how most simulations work because it's simple and keeps the state consistent.
+
+If you want the pause to happen during calculateNextState(), then the calculation must periodically check for pause:
+
+Go
+for y := startY; y < endY; y++ {
+ 
+    waitIfPaused()
+ 
+    for x := 0; x < width; x++ {
+        // calculate cell
+    }
+}
+
+or:
+
+Go
+for _, chunk := range chunks {
+ 
+    waitIfPaused()
+ 
+    processChunk(chunk)
+}
+
+Now if the user presses p halfway through, the worker will stop at the next checkpoint.
+
+The question becomes:
+
+How responsive do you want pause to be?
+
+Check once per turn → pause after current turn completes.
+Check once per row → pause within at most one row.
+Check once per cell → immediate-ish pause, but more locking overhead.
+
+For a 512×512 GoL simulation, checking once per row is usually a good compromise:
+
+Go
+for y := startY; y < endY; y++ {
+    waitIfPaused()
+ 
+    for x := 0; x < width; x++ {
+        ...
+    }
+}
+
+That gives near-instant pausing without paying the cost of a mutex/condition check for every cell.
+
+You said:
+why not put it at the end of the go outine so when the clacultion for next state is done it pauses
+Copilot said:
+
+You can, and for your coursework that's often the best place.
+
+If your code looks like:
+
+Go
+for turn := 0; turn < p.Turns; turn++ {
+    calculateNextState()
+}
+
+then you could do:
+
+Go
+for turn := 0; turn < p.Turns; turn++ {
+    calculateNextState()
+ 
+    pauseMu.Lock()
+    for paused {
+        pauseCond.Wait()
+    }
+    pauseMu.Unlock()
+}
+
+Now the behaviour is:
+
+Calculate generation N+1.
+User presses p.
+Generation N+1 finishes.
+Simulation pauses.
+User presses p again.
+Simulation continues with generation N+2.
+
+This is actually quite common in simulations because it guarantees you only ever pause between fully-computed generations.
+
+The only downside is responsiveness:
+
+Plain Text
+Press p
+↓
+Current generation still finishes
+↓
+Pause happens
+
+If a generation takes 50ms, you'll never notice.
+
+If a generation takes 5 seconds, the pause feels sluggish.
+
+For the Bristol GoL project, pausing between turns is usually perfectly reasonable because a turn is a natural synchronization point. I'd only start adding pause checks inside worker goroutines if a single generation is taking long enough that the pause feels unresponsive.
+
+You said:
+no but whtin the calc next state as that is the go routine not the outer turn
+Copilot said:
+
+Ah, I understand now.
+
+You have something like:
+
+Go
+go calculateNextState(...)
+
+and inside that goroutine there's a large calculation.
+
+You're asking why not do:
+
+Go
+func calculateNextState(...) {
+    // calculate rows/cells
+ 
+    pauseMu.Lock()
+    for paused {
+        pauseCond.Wait()
+    }
+    pauseMu.Unlock()
+}
+
+at the end of the goroutine.
+
+The answer is: you can, if that's where the goroutine's work naturally finishes.
+
+For example, if each worker goroutine calculates one chunk:
+
+Go
+func worker(...) {
+    processRows(...)
+ 
+    waitIfPaused()
+}
+
+then pressing p during processRows() won't stop the current chunk. The worker finishes its chunk and then pauses before starting more work.
+
+That's often exactly what you want because the simulation only pauses at a consistent point.
+
+The real question is:
+
+After calculateNextState() returns, what happens next?
+
+If the goroutine exits:
+
+Go
+func calculateNextState(...) {
+    processRows(...)
+    waitIfPaused()
+}
+
+then the pause is pointless because the goroutine is about to die anyway.
+
+But if it loops:
+
+Go
+func worker(...) {
+    for job := range jobs {
+        processRows(job)
+ 
+        waitIfPaused()
+    }
+}
+
+then it's a good place for the pause check.
+
+So the rule is:
+
+One-shot goroutine → pause at the end usually doesn't help.
+Long-lived worker goroutine → pause at the end of each job/chunk is a perfectly reasonable design.
+Pause between generations → put the pause after finishing a generation and before starting the next one.
+
+For Game of Life, I would normally pause between turns/generations, because that's the cleanest synchronization point.
+
+You said:
+package gol
+
+
+
+import (
+    "fmt"
+    "sync"
+    "time"
+
+
+
+    "uk.ac.bris.cs/gameoflife/util"
+)
+
+
+
+type distributorChannels struct {
+    events     chan<- Event
+    ioCommand  chan<- ioCommand
+    ioIdle     <-chan bool
+    ioFilename chan<- string
+    ioOutput   chan<- uint8
+    ioInput    <-chan uint8
+    keyPresses <-chan rune
+}
+
+
+
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup) {
+
+
+
+    defer wg.Done()
+
+
+
+    for row := startY; row < endY; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            liveCells := 0
+            for dr := -1; dr <= 1; dr++ {
+                for dc := -1; dc <= 1; dc++ {
+                    if dr == 0 && dc == 0 {
+                        continue
+                    }
+                    nRow := (row + dr + p.ImageHeight) % p.ImageHeight
+                    nCol := (column + dc + p.ImageWidth) % p.ImageWidth
+                    if world[nRow][nCol] == 255 {
+                        liveCells++
+                    }
+                }
+            }
+            if world[row][column] == 255 {
+                if liveCells == 2 || liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            } else {
+                if liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            }
+        }
+    }
+}
+
+
+
+func calculateAliveCells(p Params, world [][]byte) []util.Cell {
+    cellCoordsSlice := []util.Cell{}
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            if world[row][column] == 255 {
+                cellCoordsSlice = append(cellCoordsSlice, util.Cell{X: column, Y: row})
+            }
+        }
+    }
+
+
+
+    return cellCoordsSlice
+}
+
+
+
+// distributor divides the work between workers and interacts with other goroutines.
+func distributor(p Params, c distributorChannels) {
+    // TODO: Create a 2D slice to store the world.
+    c.ioCommand <- ioInput
+    filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
+    c.ioFilename <- filename
+
+
+
+    worldSlice := make([][]byte, p.ImageHeight)
+    for i := 0; i < len(worldSlice); i++ {
+        worldSlice[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            worldSlice[row][column] = <-c.ioInput
+        }
+    }
+
+
+
+    turn := 0
+    c.events <- StateChange{turn, Executing}
+
+
+
+    // TODO: Execute all turns of the Game of Life.
+    newWorld := make([][]byte, p.ImageHeight)
+    for i := range newWorld {
+        newWorld[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    sectionSize := p.ImageHeight / p.Threads
+
+
+
+    var wg sync.WaitGroup
+    var mu sync.Mutex
+    mustQuit := false
+    pause := false
+    resumeChan := make(chan bool) // Added channel to wake up the main loop from pause
+
+
+
+    completedTurns := 0
+    aliveCells := calculateAliveCells(p, worldSlice)
+
+
+
+    ticker := time.NewTicker(2 * time.Second)
+    done := make(chan bool)
+    defer ticker.Stop()
+    defer close(done)
+
+
+
+    go func() {
+        for {
+            select {
+            case <-done:
+                return
+            case <-ticker.C:
+                mu.Lock()
+                safecompletedTurns := completedTurns
+                safealiveCells := aliveCells
+                mu.Unlock()
+
+
+
+                c.events <- AliveCellsCount{CompletedTurns: safecompletedTurns, CellsCount: len(safealiveCells)}
+            }
+        }
+    }()
+
+
+
+    go func() {
+        for {
+            select {
+            case k := <-c.keyPresses:
+                fmt.Println("key received:", string(k))
+
+
+
+                if k == 's' {
+                    mu.Lock()
+                    safeTurns := completedTurns
+
+
+
+                    worldCopy := make([][]byte, p.ImageHeight)
+                    for r := range worldSlice {
+                        worldCopy[r] = make([]byte, p.ImageWidth)
+                        copy(worldCopy[r], worldSlice[r])
+                    }
+                    mu.Unlock()
+
+
+
+                    c.ioCommand <- ioOutput
+                    outputFilename := fmt.Sprintf("%dx%dx%d-snapshot", p.ImageWidth, p.ImageHeight, safeTurns)
+                    c.ioFilename <- outputFilename
+
+
+
+                    for row := 0; row < p.ImageHeight; row++ {
+                        for column := 0; column < p.ImageWidth; column++ {
+                            c.ioOutput <- worldCopy[row][column]
+                        }
+                    }
+
+
+
+                    c.ioCommand <- ioCheckIdle
+                    <-c.ioIdle
+                    c.events <- ImageOutputComplete{CompletedTurns: safeTurns, Filename: outputFilename}
+                } else if k == 'q' {
+                    mu.Lock()
+                    mustQuit = true
+                    mu.Unlock()
+
+
+
+                    resumeChan <- true
+
+
+
+                    done <- true
+                    return
+                } else if k == 'p' {
+                    mu.Lock()
+                    if pause {
+                        fmt.Println("Resuming the simulation.")
+                        pause = false
+                        resumeChan <- true
+
+
+
+                    } else {
+                        fmt.Println("Pausing the simulation. Press 'p' again to resume.")
+                        pause = true
+                    }
+                    mu.Unlock()
+                }
+            case <-done:
+                return
+            }
+        }
+    }()
+
+
+
+    for i := 0; i < p.Turns; i++ {
+        for w := 0; w < p.Threads; w++ {
+            startY := w * sectionSize
+            endY := (w + 1) * sectionSize
+
+
+
+            if w == p.Threads-1 {
+                endY = p.ImageHeight
+            }
+
+
+
+            wg.Add(1)
+
+
+
+            go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg)
+
+
+
+        }
+
+
+
+        wg.Wait()
+
+
+
+        worldSlice, newWorld = newWorld, worldSlice
+
+
+
+        mu.Lock()
+        completedTurns = i + 1
+        aliveCells = calculateAliveCells(p, worldSlice)
+        ispaused := pause
+        mu.Unlock()
+
+
+
+        if ispaused {
+            fmt.Printf("Simulation paused at turn %d. Press 'p' to resume.\n", completedTurns)
+            <-resumeChan
+        }
+
+
+
+        mu.Lock()
+        if mustQuit {
+            mu.Unlock()
+            break
+        }
+        mu.Unlock()
+
+
+
+        c.events <- TurnComplete{CompletedTurns: completedTurns}
+
+
+
+    }
+
+
+
+    //write to pgm file
+    c.ioCommand <- ioOutput
+    outputFilename := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+    c.ioFilename <- outputFilename
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            c.ioOutput <- worldSlice[row][column]
+        }
+    }
+
+
+
+    // Make sure that the Io has finished any output before exiting.
+    c.ioCommand <- ioCheckIdle
+    <-c.ioIdle
+
+
+
+    // TODO: Report the final state using FinalTurnCompleteEvent.
+    c.events <- FinalTurnComplete{CompletedTurns: completedTurns, Alive: aliveCells}
+    c.events <- ImageOutputComplete{CompletedTurns: completedTurns, Filename: outputFilename}
+    c.events <- StateChange{turn, Quitting}
+
+
+
+    // Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+    close(c.events)
+}
+
+
+Copilot said:
+
+Looking at your code, the reason the simulation keeps going for a bit after pressing p is because the pause check is here:
+
+Go
+wg.Wait()
+ 
+worldSlice, newWorld = newWorld, worldSlice
+ 
+...
+ 
+if ispaused {
+    <-resumeChan
+}
+
+That means:
+
+All worker goroutines start.
+They compute their slice of the next generation.
+wg.Wait() waits for them all to finish.
+Only then do you check pause.
+
+So if you press p while workers are inside:
+
+Go
+calculateNextState(...)
+
+they'll finish the whole generation before the pause takes effect.
+
+That's actually a perfectly reasonable design because you pause between generations.
+
+However, there's a bigger issue in your code:
+
+Go
+resumeChan := make(chan bool)
+
+Then:
+
+Go
+if pause {
+    <-resumeChan
+}
+
+And:
+
+Go
+if pause {
+    pause = false
+    resumeChan <- true
+}
+
+This works for one waiting goroutine.
+
+If you move the pause check into your workers:
+
+Go
+func calculateNextState(...) {
+    if paused {
+        <-resumeChan
+    }
+}
+
+then you'll have 8 workers waiting but only:
+
+Go
+resumeChan <- true
+
+wakes one of them.
+
+The other 7 remain blocked forever.
+
+That's where sync.Cond.Broadcast() becomes useful.
+
+Example:
+
+Go
+var paused bool
+var pauseMu sync.Mutex
+var pauseCond = sync.NewCond(&pauseMu)
+
+Worker:
+
+Go
+pauseMu.Lock()
+for paused {
+    pauseCond.Wait()
+}
+pauseMu.Unlock()
+
+Resume:
+
+Go
+pauseMu.Lock()
+paused = false
+pauseCond.Broadcast()
+pauseMu.Unlock()
+
+Now all 8 workers wake up together.
+
+For your current implementation, I'd actually keep it simple:
+
+Go
+wg.Wait()
+ 
+if paused {
+    <-resumeChan
+}
+
+That pauses between generations, which is usually what Game of Life simulations do.
+
+Only move the pause check into calculateNextState() if a single generation takes so long that you need the pause to be more responsive. In that case, sync.Cond is the cleaner solution than a single resume channel.
+
+You said:
+so hwot o sue this cond group to send out a pasue across all then when p is pressed again it unpauses
+Copilot said:
+
+For your case, sync.Cond would replace resumeChan entirely.
+
+1. Create shared pause state
+
+Near the top of distributor:
+
+Go
+var pauseMu sync.Mutex
+paused := false
+pauseCond := sync.NewCond(&pauseMu)
+2. Toggle from the keyboard goroutine
+
+Replace your p handling with:
+
+Go
+} else if k == 'p' {
+    pauseMu.Lock()
+ 
+    paused = !paused
+ 
+    if paused {
+        fmt.Println("Paused")
+    } else {
+        fmt.Println("Resumed")
+        pauseCond.Broadcast()
+    }
+ 
+    pauseMu.Unlock()
+}
+
+Broadcast() wakes all waiting goroutines.
+
+3. Create a helper
+Go
+waitIfPaused := func() {
+    pauseMu.Lock()
+ 
+    for paused {
+        pauseCond.Wait()
+    }
+ 
+    pauseMu.Unlock()
+}
+4. Use it in workers
+
+At the start of each row:
+
+Go
+func calculateNextState(...) {
+    defer wg.Done()
+ 
+    for row := startY; row < endY; row++ {
+ 
+        pauseMu.Lock()
+        for paused {
+            pauseCond.Wait()
+        }
+        pauseMu.Unlock()
+ 
+        for column := 0; column < p.ImageWidth; column++ {
+            ...
+        }
+    }
+}
+
+Now:
+
+Press p
+paused = true
+Each worker eventually reaches the pause check
+Workers sleep
+Press p again
+Broadcast()
+All workers wake up and continue
+Even cleaner
+
+Since you're using a WaitGroup, you could pause between generations:
+
+Go
+wg.Wait()
+ 
+pauseMu.Lock()
+for paused {
+    pauseCond.Wait()
+}
+pauseMu.Unlock()
+
+This is probably what I'd do for GoL.
+
+Advantages:
+
+No worker changes.
+Pauses at generation boundaries.
+State is always consistent.
+Much simpler.
+
+So ask yourself:
+
+Do I want pause during a generation, or between generations?
+
+For most GoL implementations, between generations is the cleanest solution and only requires a single Cond.Wait() in the distributor loop after wg.Wait().
+
+You said:
+repeat again but also answer why we need aothe utex specicially for pause ?
+Copilot said:
+
+The reason you need a mutex is that multiple goroutines are reading and writing paused.
+
+Right now you have:
+
+Keyboard goroutine:
+Go
+paused = !paused
+Worker goroutines:
+Go
+if paused {
+    ...
+}
+
+Those can happen at the same time.
+
+That's called a data race.
+
+Why can't sync.Cond do it itself?
+
+A sync.Cond doesn't actually store any state.
+
+It only provides:
+
+Go
+Wait()
+Signal()
+Broadcast()
+
+It has no idea what "paused" means.
+
+You still need a variable:
+
+Go
+paused := true
+
+and something must protect access to that variable:
+
+Go
+var mu sync.Mutex
+
+Think of it as:
+
+Plain Text
+Mutex = protects state
+Cond   = lets goroutines sleep until state changes
+Complete setup
+Go
+var pauseMu sync.Mutex
+paused := false
+ 
+pauseCond := sync.NewCond(&pauseMu)
+
+Notice the mutex is given to the condition variable:
+
+Go
+sync.NewCond(&pauseMu)
+Pausing
+
+When p is pressed:
+
+Go
+pauseMu.Lock()
+paused = true
+pauseMu.Unlock()
+
+Workers reaching the pause check will stop.
+
+Worker side
+
+Anywhere you want a worker to stop:
+
+Go
+pauseMu.Lock()
+ 
+for paused {
+    pauseCond.Wait()
+}
+ 
+pauseMu.Unlock()
+What happens here?
+
+Suppose:
+
+Go
+paused == true
+
+Worker executes:
+
+Go
+for paused {
+    pauseCond.Wait()
+}
+
+It goes to sleep.
+
+No CPU usage.
+
+Resuming
+
+When p is pressed again:
+
+Go
+pauseMu.Lock()
+ 
+paused = false
+ 
+pauseCond.Broadcast()
+ 
+pauseMu.Unlock()
+
+Broadcast() wakes every sleeping worker.
+
+Each worker wakes and checks:
+
+Go
+for paused {
+    pauseCond.Wait()
+}
+
+Since:
+
+Go
+paused == false
+
+they leave the loop and continue processing.
+
+Why for?
+
+Never do:
+
+Go
+if paused {
+    pauseCond.Wait()
+}
+
+Always:
+
+Go
+for paused {
+    pauseCond.Wait()
+}
+
+because waking doesn't guarantee the condition is satisfied.
+
+The rule is:
+
+Plain Text
+Wake up
+↓
+Check state again
+↓
+Continue if state is correct
+For your Game of Life
+
+A simple implementation would be:
+
+Go
+var pauseMu sync.Mutex
+paused := false
+pauseCond := sync.NewCond(&pauseMu)
+
+p key:
+
+Go
+pauseMu.Lock()
+ 
+paused = !paused
+ 
+if !paused {
+    pauseCond.Broadcast()
+}
+ 
+pauseMu.Unlock()
+
+Workers:
+
+Go
+for row := startY; row < endY; row++ {
+ 
+    pauseMu.Lock()
+    for paused {
+        pauseCond.Wait()
+    }
+    pauseMu.Unlock()
+ 
+    // calculate row
+}
+
+Now pressing p:
+
+Plain Text
+paused = true
+
+causes all workers to eventually reach Wait() and sleep.
+
+Pressing p again:
+
+Plain Text
+paused = false
+Broadcast()
+
+wakes every worker at once and they continue where they left off.
+
+That's the core pattern for sync.Cond:
+
+Lock mutex.
+Check shared state.
+Wait() while state isn't what you want.
+Change state elsewhere.
+Signal() or Broadcast().
+Waiting goroutines wake and re-check the state.
+
+You said:
+var wg sync.WaitGroup
+    var mu sync.Mutex
+     but i alredy have a mutex
+
+
+Copilot said:
+
+Yes, you can reuse the same mutex.
+
+Go
+var wg sync.WaitGroup
+var mu sync.Mutex
+
+There's nothing stopping you from doing:
+
+Go
+paused := false
+pauseCond := sync.NewCond(&mu)
+
+and then using mu for paused.
+
+The reason I suggested a separate mutex is mostly clarity.
+
+Right now your mu protects:
+
+Go
+completedTurns
+aliveCells
+mustQuit
+pause
+
+If you use cond.Wait(), something like this happens:
+
+Go
+mu.Lock()
+for pause {
+    pauseCond.Wait()
+}
+mu.Unlock()
+
+While that goroutine is waiting, mu becomes part of the pause mechanism.
+
+It still works, but now every access to:
+
+Go
+completedTurns
+aliveCells
+mustQuit
+pause
+
+is sharing the same lock.
+
+That's not wrong, it's just a bit harder to reason about.
+
+For your code I'd probably do:
+
+Go
+var mu sync.Mutex
+ 
+paused := false
+pauseCond := sync.NewCond(&mu)
+
+and reuse mu.
+
+Then:
+
+Go
+// p pressed
+mu.Lock()
+ 
+pause = !pause
+ 
+if !pause {
+    pauseCond.Broadcast()
+}
+ 
+mu.Unlock()
+
+And where you want to pause:
+
+Go
+mu.Lock()
+ 
+for pause {
+    pauseCond.Wait()
+}
+ 
+mu.Unlock()
+
+The important thing is that the mutex used by:
+
+Go
+sync.NewCond(&mu)
+
+must be the same mutex that's protecting the pause variable.
+
+So:
+
+Go
+pauseCond := sync.NewCond(&mu)
+
+✅ reuse existing mutex
+
+Go
+pauseCond := sync.NewCond(&pauseMu)
+
+✅ separate pause mutex
+
+Both are valid. For your coursework code, reusing mu is completely fine.
+
+You said:
+so the pattern for pasuign an resuming is via the shared conditional
+Copilot said:
+
+Yes, exactly.
+
+For a pause/resume system with multiple goroutines, the pattern is:
+
+Go
+shared state (paused bool)
+        +
+mutex
+        +
+condition variable
+
+The condition variable doesn't represent pause itself. The paused variable does.
+
+Go
+paused := true
+
+The condition variable is just the mechanism that lets goroutines sleep until paused changes.
+
+Pause
+Go
+mu.Lock()
+paused = true
+mu.Unlock()
+
+Workers will eventually reach:
+
+Go
+mu.Lock()
+for paused {
+    cond.Wait()
+}
+mu.Unlock()
+
+and go to sleep.
+
+Resume
+Go
+mu.Lock()
+paused = false
+cond.Broadcast()
+mu.Unlock()
+
+Broadcast() wakes everybody.
+
+When they wake up they check:
+
+Go
+for paused {
+    cond.Wait()
+}
+
+again.
+
+Since:
+
+Go
+paused == false
+
+they continue.
+
+Mental model
+Plain Text
+paused = true
+
+means:
+
+"The simulation is paused."
+
+Go
+cond.Wait()
+
+means:
+
+"Sleep until somebody changes that state."
+
+Go
+cond.Broadcast()
+
+means:
+
+"The state has changed, everyone wake up and check it."
+
+
+For your GoL coursework, that's probably cleaner than channels because you have **multiple worker goroutines** that all need to stop and resume together. A single `Broadcast()` wakes them all, whereas a channel send normally only wakes one receiver.
+
+You said:
+calculte nextsate doent hold either the lock or th pause vairiable so how will the worker pause?
+Copilot said:
+
+Good catch. It won't, unless calculateNextState has access to the same paused, mu, and cond.
+
+Right now your worker looks like:
+
+Go
+func calculateNextState(
+    p Params,
+    startY int,
+    endY int,
+    world [][]byte,
+    newWorld [][]byte,
+    wg *sync.WaitGroup,
+) {
+
+It knows nothing about:
+
+Go
+pause
+mu
+pauseCond
+
+so it can't pause itself.
+
+You have two options.
+
+Option 1: Pause in the distributor only
+
+This is what you're already doing:
+
+Go
+wg.Wait()
+ 
+if paused {
+    <-resumeChan
+}
+
+Workers don't need to know anything about pausing. The simulation pauses between generations.
+
+Option 2: Pause inside workers
+
+Pass the shared state into the workers.
+
+For example:
+
+Go
+func calculateNextState(
+    p Params,
+    startY int,
+    endY int,
+    world [][]byte,
+    newWorld [][]byte,
+    wg *sync.WaitGroup,
+    mu *sync.Mutex,
+    pauseCond *sync.Cond,
+    paused *bool,
+) {
+
+Then inside:
+
+Go
+for row := startY; row < endY; row++ {
+ 
+    mu.Lock()
+    for *paused {
+        pauseCond.Wait()
+    }
+    mu.Unlock()
+ 
+    // calculate row
+}
+
+Now every worker can stop itself.
+
+Which should you choose?
+
+For your coursework I'd probably keep:
+
+Go
+wg.Wait()
+ 
+mu.Lock()
+for pause {
+    pauseCond.Wait()
+}
+mu.Unlock()
+
+in the distributor.
+
+That's much simpler and ensures a pause occurs only after a generation has completed.
+
+Only move the pause logic into calculateNextState() if your generations take long enough that waiting for the current generation to finish feels too slow. In that case the workers must be given access to the same shared pause state and sync.Cond.
+
+You said:
+no becaus ewhen i paue the turn still contineu even after it sas pausing
+Copilot said:
+
+That tells me the pause is happening after the turn is already complete, not during the calculation.
+
+Looking at your code:
+
+Go
+for i := 0; i < p.Turns; i++ {
+ 
+    // launch workers
+ 
+    wg.Wait()
+ 
+    worldSlice, newWorld = newWorld, newWorld
+ 
+    ...
+ 
+    if ispaused {
+        fmt.Printf("Simulation paused at turn %d\n", completedTurns)
+        <-resumeChan
+    }
+ 
+    c.events <- TurnComplete{...}
+}
+
+The only place you check pause is after all workers have finished:
+
+Go
+wg.Wait()
+
+So if you press p:
+
+Workers are already computing.
+wg.Wait() is waiting for them.
+The generation completes.
+Pause message prints.
+Program waits on resumeChan.
+
+If you're seeing turns continue increasing after "Pausing" is printed, then one of two things is happening:
+
+Possibility 1
+
+The workers have already been launched for the next generation before the pause check runs.
+
+Add:
+
+Go
+fmt.Println("Starting turn", i)
+
+at the top of the loop and see if turns continue after the pause message.
+
+Possibility 2
+
+More likely:
+
+Your ticker goroutine is still running:
+
+Go
+go func() {
+    for {
+        select {
+        case <-ticker.C:
+            c.events <- AliveCellsCount{...}
+
+That goroutine never checks pause.
+
+So while the simulation is paused, SDL may still print:
+
+Plain Text
+Completed Turns 1234 Alive Cells ...
+
+using the last value of:
+
+Go
+completedTurns
+aliveCells
+
+making it look like the simulation is still running.
+
+Quick test
+
+Put:
+
+Go
+fmt.Println("PAUSE CHECK")
+
+immediately before:
+
+Go
+<-resumeChan
+
+and:
+
+Go
+fmt.Println("RESUMED")
+
+immediately after.
+
+If you get:
+
+Plain Text
+PAUSE CHECK
+
+and then nothing until pressing p again, the simulation itself is paused correctly.
+
+One thing I would change immediately:
+
+You're accessing pause using two different synchronization mechanisms:
+
+Go
+mu.Lock()
+pause = true
+mu.Unlock()
+
+and
+
+Go
+ispaused := pause
+
+under the same mutex.
+
+If you move to sync.Cond, do it properly:
+
+Go
+mu.Lock()
+for pause {
+    pauseCond.Wait()
+}
+mu.Unlock()
+
+and get rid of resumeChan entirely.
+
+But first verify whether it's actually the simulation advancing, or just the ticker continuing to emit events. That's the most likely explanation from the code you've shown.
+
+You said:
+how to use conitional gorups in go to pause go worker mid execution
+Copilot said:
+
+If you want to pause a worker mid-execution, sync.Cond works like a checkpoint system. The worker must periodically check whether it's paused.
+
+For example:
+
+Go
+var (
+    mu     sync.Mutex
+    paused bool
+    cond   = sync.NewCond(&mu)
+)
+
+Worker:
+
+Go
+func worker() {
+    for row := startY; row < endY; row++ {
+ 
+        mu.Lock()
+        for paused {
+            cond.Wait()
+        }
+        mu.Unlock()
+ 
+        // Process row
+        processRow(row)
+    }
+}
+
+Pause:
+
+Go
+mu.Lock()
+paused = true
+mu.Unlock()
+
+Resume:
+
+Go
+mu.Lock()
+paused = false
+cond.Broadcast()
+mu.Unlock()
+Important
+
+sync.Cond cannot magically stop a goroutine wherever it currently is.
+
+Suppose the worker is here:
+
+Go
+processRow(row)
+
+and you press p.
+
+The worker will continue until it reaches:
+
+Go
+for paused {
+    cond.Wait()
+}
+
+again.
+
+So you need to decide where your pause checkpoints are:
+
+Go
+for row := startY; row < endY; row++ {
+    waitIfPaused()
+    processRow(row)
+}
+
+or even:
+
+Go
+for column := 0; column < width; column++ {
+    waitIfPaused()
+    processCell(...)
+}
+
+The more often you check, the more responsive pause becomes.
+
+For your Game of Life workers, I'd probably pause once per row:
+
+Go
+for row := startY; row < endY; row++ {
+ 
+    mu.Lock()
+    for paused {
+        cond.Wait()
+    }
+    mu.Unlock()
+ 
+    for col := 0; col < p.ImageWidth; col++ {
+        // calculate cell
+    }
+}
+
+That gives near-instant pausing without checking the condition for every single cell.
+
+You said:
+package gol
+
+
+
+import (
+    "fmt"
+    "sync"
+    "time"
+
+
+
+    "uk.ac.bris.cs/gameoflife/util"
+)
+
+
+
+type distributorChannels struct {
+    events     chan<- Event
+    ioCommand  chan<- ioCommand
+    ioIdle     <-chan bool
+    ioFilename chan<- string
+    ioOutput   chan<- uint8
+    ioInput    <-chan uint8
+    keyPresses <-chan rune
+}
+
+
+
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause bool, cond *sync.Cond) {
+
+
+
+    defer wg.Done()
+
+
+
+    for row := startY; row < endY; row++ {
+        mu.Lock()
+        for pause {
+            cond.Wait()
+        }
+        mu.Unlock()
+        for column := 0; column < p.ImageWidth; column++ {
+            liveCells := 0
+            for dr := -1; dr <= 1; dr++ {
+                for dc := -1; dc <= 1; dc++ {
+                    if dr == 0 && dc == 0 {
+                        continue
+                    }
+                    nRow := (row + dr + p.ImageHeight) % p.ImageHeight
+                    nCol := (column + dc + p.ImageWidth) % p.ImageWidth
+                    if world[nRow][nCol] == 255 {
+                        liveCells++
+                    }
+                }
+            }
+            if world[row][column] == 255 {
+                if liveCells == 2 || liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            } else {
+                if liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            }
+        }
+    }
+}
+
+
+
+func calculateAliveCells(p Params, world [][]byte) []util.Cell {
+    cellCoordsSlice := []util.Cell{}
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            if world[row][column] == 255 {
+                cellCoordsSlice = append(cellCoordsSlice, util.Cell{X: column, Y: row})
+            }
+        }
+    }
+
+
+
+    return cellCoordsSlice
+}
+
+
+
+// distributor divides the work between workers and interacts with other goroutines.
+func distributor(p Params, c distributorChannels) {
+    // TODO: Create a 2D slice to store the world.
+    c.ioCommand <- ioInput
+    filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
+    c.ioFilename <- filename
+
+
+
+    worldSlice := make([][]byte, p.ImageHeight)
+    for i := 0; i < len(worldSlice); i++ {
+        worldSlice[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            worldSlice[row][column] = <-c.ioInput
+        }
+    }
+
+
+
+    turn := 0
+    c.events <- StateChange{turn, Executing}
+
+
+
+    // TODO: Execute all turns of the Game of Life.
+    newWorld := make([][]byte, p.ImageHeight)
+    for i := range newWorld {
+        newWorld[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    sectionSize := p.ImageHeight / p.Threads
+
+
+
+    var wg sync.WaitGroup
+    var mu sync.Mutex
+    var cond = sync.NewCond(&mu)
+
+
+
+    mustQuit := false
+    pause := false
+
+
+
+    completedTurns := 0
+    aliveCells := calculateAliveCells(p, worldSlice)
+
+
+
+    ticker := time.NewTicker(2 * time.Second)
+    done := make(chan bool)
+    defer ticker.Stop()
+    defer close(done)
+
+
+
+    go func() {
+        for {
+            select {
+            case <-done:
+                return
+            case <-ticker.C:
+                mu.Lock()
+                safecompletedTurns := completedTurns
+                safealiveCells := aliveCells
+                mu.Unlock()
+
+
+
+                c.events <- AliveCellsCount{CompletedTurns: safecompletedTurns, CellsCount: len(safealiveCells)}
+            }
+        }
+    }()
+
+
+
+    go func() {
+        for {
+            select {
+            case k := <-c.keyPresses:
+                fmt.Println("key received:", string(k))
+
+
+
+                if k == 's' {
+                    mu.Lock()
+                    safeTurns := completedTurns
+
+
+
+                    worldCopy := make([][]byte, p.ImageHeight)
+                    for r := range worldSlice {
+                        worldCopy[r] = make([]byte, p.ImageWidth)
+                        copy(worldCopy[r], worldSlice[r])
+                    }
+                    mu.Unlock()
+
+
+
+                    c.ioCommand <- ioOutput
+                    outputFilename := fmt.Sprintf("%dx%dx%d-snapshot", p.ImageWidth, p.ImageHeight, safeTurns)
+                    c.ioFilename <- outputFilename
+
+
+
+                    for row := 0; row < p.ImageHeight; row++ {
+                        for column := 0; column < p.ImageWidth; column++ {
+                            c.ioOutput <- worldCopy[row][column]
+                        }
+                    }
+
+
+
+                    c.ioCommand <- ioCheckIdle
+                    <-c.ioIdle
+                    c.events <- ImageOutputComplete{CompletedTurns: safeTurns, Filename: outputFilename}
+                } else if k == 'q' {
+                    mu.Lock()
+                    mustQuit = true
+                    mu.Unlock()
+
+
+
+                    mu.Lock()
+                    pause = false
+                    mu.Unlock()
+
+
+
+                    done <- true
+                    return
+                } else if k == 'p' {
+                    mu.Lock()
+                    if pause {
+                        fmt.Println("Resuming the simulation.")
+                        pause = false
+                        cond.Broadcast()
+                        mu.Unlock()
+
+
+
+                    } else {
+                        fmt.Println("Pausing the simulation. Press 'p' again to resume.")
+                        pause = true
+                        mu.Unlock()
+                    }
+                }
+            case <-done:
+                return
+            }
+        }
+    }()
+
+
+
+    for i := 0; i < p.Turns; i++ {
+        for w := 0; w < p.Threads; w++ {
+            startY := w * sectionSize
+            endY := (w + 1) * sectionSize
+
+
+
+            if w == p.Threads-1 {
+                endY = p.ImageHeight
+            }
+
+
+
+            wg.Add(1)
+
+
+
+            go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, pause, cond)
+
+
+
+        }
+
+
+
+        wg.Wait()
+
+
+
+        worldSlice, newWorld = newWorld, worldSlice
+
+
+
+        mu.Lock()
+        completedTurns = i + 1
+        aliveCells = calculateAliveCells(p, worldSlice)
+        mu.Unlock()
+
+
+
+        mu.Lock()
+        if mustQuit {
+            mu.Unlock()
+            break
+        }
+        mu.Unlock()
+
+
+
+        c.events <- TurnComplete{CompletedTurns: completedTurns}
+
+
+
+    }
+
+
+
+    //write to pgm file
+    c.ioCommand <- ioOutput
+    outputFilename := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+    c.ioFilename <- outputFilename
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            c.ioOutput <- worldSlice[row][column]
+        }
+    }
+
+
+
+    // Make sure that the Io has finished any output before exiting.
+    c.ioCommand <- ioCheckIdle
+    <-c.ioIdle
+
+
+
+    // TODO: Report the final state using FinalTurnCompleteEvent.
+    c.events <- FinalTurnComplete{CompletedTurns: completedTurns, Alive: aliveCells}
+    c.events <- ImageOutputComplete{CompletedTurns: completedTurns, Filename: outputFilename}
+    c.events <- StateChange{turn, Quitting}
+
+
+
+    // Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+    close(c.events)
+}
+
+
+is this fine an am i usign mu.lcok too much what is teh ruel fir when to use it
+Copilot said:
+
+It's not fine yet. There's a major bug:
+
+Go
+go calculateNextState(
+    p, startY, endY,
+    worldSlice, newWorld,
+    &wg, &mu,
+    pause,     // <-- bug
+    cond,
+)
+
+You're passing:
+
+Go
+pause bool
+
+by value.
+
+Inside calculateNextState:
+
+Go
+for pause {
+    cond.Wait()
+}
+
+pause is just a copy of the value at the moment the goroutine starts.
+
+If the user presses p later:
+
+Go
+pause = true
+
+in the distributor, the worker's copy doesn't change.
+
+You need either:
+
+Go
+pause *bool
+
+and then:
+
+Go
+for *pause {
+    cond.Wait()
+}
+
+or better, don't pass it at all and use the shared variable under the mutex.
+
+Another issue
+
+You're using the same mutex for:
+
+Go
+completedTurns
+aliveCells
+mustQuit
+pause
+
+That's legal.
+
+For coursework code I'd keep it that way.
+
+Rule for mu.Lock()
+
+Lock when:
+
+Reading shared data that another goroutine can modify.
+Writing shared data.
+
+For example:
+
+Go
+mu.Lock()
+pause = true
+mu.Unlock()
+
+Good.
+
+Go
+mu.Lock()
+isPaused := pause
+mu.Unlock()
+
+Good.
+
+Don't hold the lock while doing expensive work
+
+Bad:
+
+Go
+mu.Lock()
+ 
+for column := 0; column < p.ImageWidth; column++ {
+    // thousands of calculations
+}
+ 
+mu.Unlock()
+
+This blocks everyone else.
+
+Your worker pattern is good
+Go
+for row := startY; row < endY; row++ {
+ 
+    mu.Lock()
+    for *pause {
+        cond.Wait()
+    }
+    mu.Unlock()
+ 
+    // compute row
+}
+
+The lock is held only briefly.
+
+I'd write the worker like this
+Go
+func calculateNextState(
+    p Params,
+    startY int,
+    endY int,
+    world [][]byte,
+    newWorld [][]byte,
+    wg *sync.WaitGroup,
+    mu *sync.Mutex,
+    pause *bool,
+    cond *sync.Cond,
+) {
+    defer wg.Done()
+ 
+    for row := startY; row < endY; row++ {
+ 
+        mu.Lock()
+        for *pause {
+            cond.Wait()
+        }
+        mu.Unlock()
+ 
+        // calculate row
+    }
+}
+
+And call it:
+
+Go
+go calculateNextState(
+    p,
+    startY,
+    endY,
+    worldSlice,
+    newWorld,
+    &wg,
+    &mu,
+    &pause,
+    cond,
+)
+
+The key idea is:
+
+Cond wakes goroutines.
+The shared pause variable tells them whether they should continue.
+The mutex protects access to that shared variable.
+
+Right now you're waking workers with the condition variable, but they're looking at a stale copy of pause, so the pause mechanism won't behave correctly.
+
+You said:
+is there any way to just use the shared value instead of passing by pointer
+Copilot said:
+
+Yes. A common Go pattern is to make the pause state part of a shared struct instead of passing a dozen pointers around.
+
+For example:
+
+Go
+type PauseController struct {
+    paused bool
+    mu     sync.Mutex
+    cond   *sync.Cond
+}
+ 
+func NewPauseController() *PauseController {
+    p := &PauseController{}
+    p.cond = sync.NewCond(&p.mu)
+    return p
+}
+
+Then pass just:
+
+Go
+pauseCtrl *PauseController
+
+to workers.
+
+If you're asking whether you can avoid passing anything to calculateNextState, then no.
+
+Currently:
+
+Go
+func calculateNextState(...)
+
+has no access to:
+
+Go
+pause
+mu
+cond
+
+so it cannot know whether it should pause.
+
+The worker must somehow be able to access the shared state, either through:
+
+a pointer parameter (*bool)
+a struct containing the pause state
+package-level/global variables (not recommended)
+
+Also, if you do use a pointer, make it:
+
+Go
+pause *bool
+
+not:
+
+Go
+pause bool
+
+because currently:
+
+Go
+go calculateNextState(..., pause, cond)
+
+copies the value of pause at goroutine creation time.
+
+So if:
+
+Go
+pause = false
+
+when the worker starts, the worker will forever see:
+
+Go
+pause == false
+
+even if another goroutine later does:
+
+Go
+pause = true
+
+That's the main bug in your current implementation.
+
+I'd probably create a small shared struct:
+
+Go
+type SimulationState struct {
+    paused bool
+    mu     sync.Mutex
+    cond   *sync.Cond
+}
+
+and pass a pointer to that. It's cleaner than passing *sync.Mutex, *bool, and *sync.Cond separately.
+
+You said:
+could i use a channel to constant pass the value or is this an issue
+Copilot said:
+
+You could, but it's usually the wrong tool for this.
+
+For example:
+
+Go
+pauseChan := make(chan bool)
+ 
+go func() {
+    for {
+        pause = <-pauseChan
+    }
+}()
+
+Now every pause change is sent through a channel.
+
+The problem is that workers need to continuously know the current state, not just receive an event.
+
+Channels are naturally:
+
+Plain Text
+"Pause happened!"
+"Resume happened!"
+
+whereas your worker needs:
+
+Plain Text
+"Am I currently paused?"
+
+That's shared state.
+
+Why channels get awkward
+
+Suppose you have 8 workers:
+
+Go
+if <-pauseChan {
+    ...
+}
+
+When you send:
+
+Go
+pauseChan <- true
+
+only one receiver gets that value.
+
+The other 7 workers don't see it.
+
+You end up needing:
+
+broadcast channels,
+fan-out logic,
+multiple sends,
+or recreating channels.
+
+At that point you're basically rebuilding what sync.Cond already does.
+
+The Go way
+
+Use:
+
+Go
+paused bool
+mu sync.Mutex
+cond *sync.Cond
+
+because:
+
+paused is the shared state
+workers check that state
+Broadcast() wakes everyone
+Go
+mu.Lock()
+for paused {
+    cond.Wait()
+}
+mu.Unlock()
+If you really want a channel
+
+A neat pattern is:
+
+Go
+var pauseCh chan struct{}
+
+Paused:
+
+Go
+pauseCh = make(chan struct{})
+
+Workers:
+
+Go
+<-pauseCh
+
+Resume:
+
+Go
+close(pauseCh)
+
+Closing a channel wakes all waiting goroutines.
+
+But for repeated pause/resume cycles you have to keep creating new channels:
+
+Go
+pauseCh = make(chan struct{}) // pause
+close(pauseCh)                // resume
+
+which is harder to reason about than:
+
+Go
+paused = true
+cond.Wait()
+ 
+paused = false
+cond.Broadcast()
+
+For your Game of Life coursework, I'd stick with sync.Cond. You're trying to coordinate multiple workers based on a single shared state (paused), which is exactly what condition variables are designed for.
+
+You said:
+but when the state changes of the pause variabel it will always be there until checked by using a buffered channel
+Copilot said:
+
+You're thinking along the right lines.
+
+A buffered channel can act like storage for a state change:
+
+Go
+pauseChan := make(chan bool, 1)
+ 
+pauseChan <- true
+
+The value sits in the buffer until something receives it.
+
+The problem is that a channel stores events, not current state.
+
+For example:
+
+Go
+pauseChan <- true
+pauseChan <- false
+
+With a buffer size of 1, one of those sends blocks.
+
+With a larger buffer:
+
+Go
+[true, false]
+
+Now a worker reading later gets a sequence of historical states:
+
+Go
+true
+false
+
+But what it actually wants is:
+
+Plain Text
+What is the pause state right now?
+
+not
+
+Plain Text
+What were all the pause changes?
+
+This is why a shared variable is usually better:
+
+Go
+paused bool
+
+There's only one value:
+
+Go
+paused = true
+paused = false
+
+Workers always check the current state:
+
+Go
+for paused {
+    cond.Wait()
+}
+
+No history, no stale messages.
+
+Think of it like this:
+
+Channel
+Plain Text
+Pause event sent
+Resume event sent
+Pause event sent
+
+You consume messages.
+
+Shared variable
+Plain Text
+paused = true
+
+You inspect the current reality.
+
+For your Game of Life pause system, you're really modelling:
+
+"Is the simulation currently paused?"
+
+That's state.
+
+So:
+
+Go
+paused bool
+sync.Cond
+
+is generally the cleanest solution.
+
+Channels are usually better for:
+
+Go
+worker <- Job{}
+keyPresses <- 'p'
+events <- TurnComplete{}
+
+where individual messages matter.
+
+For pause/resume, the latest state matters, not the history of transitions. That's exactly why condition variables plus a shared variable are a common pattern.
+
+You said:
+so hwo do you share a varibale in emeory acorss a maint rountien adn go rountine is it onyl pass by referene
+Copilot said:
+
+Yes, in Go, for multiple goroutines to see the same variable, they must all have access to the same memory location.
+
+The common ways are:
+
+1. Pass a pointer
+Go
+func worker(paused *bool) {
+    if *paused {
+        fmt.Println("paused")
+    }
+}
+Go
+paused := false
+go worker(&paused)
+
+Now both goroutines are looking at the same boolean in memory.
+
+2. Put it in a shared struct
+
+This is often cleaner:
+
+Go
+type State struct {
+    paused bool
+    mu     sync.Mutex
+}
+ 
+state := &State{}
+ 
+go worker(state)
+
+Worker:
+
+Go
+func worker(state *State) {
+    state.mu.Lock()
+    p := state.paused
+    state.mu.Unlock()
+}
+3. Global/package variable
+Go
+var paused bool
+
+Every goroutine can see it.
+
+Technically works, but usually discouraged because it becomes harder to reason about and test.
+
+Important
+
+Just because something is shared doesn't mean it's safe:
+
+Go
+go func() {
+    paused = true
+}()
+ 
+go func() {
+    if paused {
+        ...
+    }
+}()
+
+This is a data race.
+
+You need synchronization:
+
+Go
+mu.Lock()
+paused = true
+mu.Unlock()
+
+and
+
+Go
+mu.Lock()
+p := paused
+mu.Unlock()
+
+or use atomics.
+
+In your code
+
+Right now:
+
+Go
+go calculateNextState(..., pause, cond)
+
+passes a copy of pause.
+
+Each worker gets its own boolean value.
+
+If pause changes later:
+
+Go
+pause = true
+
+the workers don't see it.
+
+To share it, you need either:
+
+Go
+go calculateNextState(..., &pause, cond)
+
+and
+
+Go
+pause *bool
+
+or:
+
+Go
+type SimulationState struct {
+    pause bool
+    mu    sync.Mutex
+    cond  *sync.Cond
+}
+
+and pass:
+
+Go
+*SimulationState
+
+to all goroutines.
+
+For your GoL project, I'd strongly recommend the struct approach. It's cleaner than passing *bool, *sync.Mutex, and *sync.Cond separately.
+
+You said:
+package gol
+
+
+
+import (
+    "fmt"
+    "sync"
+    "time"
+
+
+
+    "uk.ac.bris.cs/gameoflife/util"
+)
+
+
+
+type distributorChannels struct {
+    events     chan<- Event
+    ioCommand  chan<- ioCommand
+    ioIdle     <-chan bool
+    ioFilename chan<- string
+    ioOutput   chan<- uint8
+    ioInput    <-chan uint8
+    keyPresses <-chan rune
+}
+
+
+
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond) {
+
+
+
+    defer wg.Done()
+
+
+
+    for row := startY; row < endY; row++ {
+        mu.Lock()
+        for *pause {
+            cond.Wait()
+        }
+        mu.Unlock()
+        for column := 0; column < p.ImageWidth; column++ {
+            liveCells := 0
+            for dr := -1; dr <= 1; dr++ {
+                for dc := -1; dc <= 1; dc++ {
+                    if dr == 0 && dc == 0 {
+                        continue
+                    }
+                    nRow := (row + dr + p.ImageHeight) % p.ImageHeight
+                    nCol := (column + dc + p.ImageWidth) % p.ImageWidth
+                    if world[nRow][nCol] == 255 {
+                        liveCells++
+                    }
+                }
+            }
+            if world[row][column] == 255 {
+                if liveCells == 2 || liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            } else {
+                if liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            }
+        }
+    }
+}
+
+
+
+func calculateAliveCells(p Params, world [][]byte) []util.Cell {
+    cellCoordsSlice := []util.Cell{}
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            if world[row][column] == 255 {
+                cellCoordsSlice = append(cellCoordsSlice, util.Cell{X: column, Y: row})
+            }
+        }
+    }
+
+
+
+    return cellCoordsSlice
+}
+
+
+
+// distributor divides the work between workers and interacts with other goroutines.
+func distributor(p Params, c distributorChannels) {
+    // TODO: Create a 2D slice to store the world.
+    c.ioCommand <- ioInput
+    filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
+    c.ioFilename <- filename
+
+
+
+    worldSlice := make([][]byte, p.ImageHeight)
+    for i := 0; i < len(worldSlice); i++ {
+        worldSlice[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            worldSlice[row][column] = <-c.ioInput
+        }
+    }
+
+
+
+    turn := 0
+    c.events <- StateChange{turn, Executing}
+
+
+
+    // TODO: Execute all turns of the Game of Life.
+    newWorld := make([][]byte, p.ImageHeight)
+    for i := range newWorld {
+        newWorld[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    sectionSize := p.ImageHeight / p.Threads
+
+
+
+    var wg sync.WaitGroup
+    var mu sync.Mutex
+    var cond = sync.NewCond(&mu)
+
+
+
+    mustQuit := false
+    pause := false
+
+
+
+    completedTurns := 0
+    aliveCells := calculateAliveCells(p, worldSlice)
+
+
+
+    ticker := time.NewTicker(2 * time.Second)
+    done := make(chan bool)
+    defer ticker.Stop()
+    defer close(done)
+
+
+
+    go func() {
+        for {
+            select {
+            case <-done:
+                return
+            case <-ticker.C:
+                mu.Lock()
+                safecompletedTurns := completedTurns
+                safealiveCells := aliveCells
+                mu.Unlock()
+
+
+
+                c.events <- AliveCellsCount{CompletedTurns: safecompletedTurns, CellsCount: len(safealiveCells)}
+            }
+        }
+    }()
+
+
+
+    go func() {
+        for {
+            select {
+            case k := <-c.keyPresses:
+                fmt.Println("key received:", string(k))
+
+
+
+                if k == 's' {
+                    mu.Lock()
+                    safeTurns := completedTurns
+
+
+
+                    worldCopy := make([][]byte, p.ImageHeight)
+                    for r := range worldSlice {
+                        worldCopy[r] = make([]byte, p.ImageWidth)
+                        copy(worldCopy[r], worldSlice[r])
+                    }
+                    mu.Unlock()
+
+
+
+                    c.ioCommand <- ioOutput
+                    outputFilename := fmt.Sprintf("%dx%dx%d-snapshot", p.ImageWidth, p.ImageHeight, safeTurns)
+                    c.ioFilename <- outputFilename
+
+
+
+                    for row := 0; row < p.ImageHeight; row++ {
+                        for column := 0; column < p.ImageWidth; column++ {
+                            c.ioOutput <- worldCopy[row][column]
+                        }
+                    }
+
+
+
+                    c.ioCommand <- ioCheckIdle
+                    <-c.ioIdle
+                    c.events <- ImageOutputComplete{CompletedTurns: safeTurns, Filename: outputFilename}
+                } else if k == 'q' {
+                    mu.Lock()
+                    mustQuit = true
+                    mu.Unlock()
+
+
+
+                    mu.Lock()
+                    pause = false
+                    mu.Unlock()
+
+
+
+                    done <- true
+                    return
+                } else if k == 'p' {
+                    mu.Lock()
+                    if pause {
+                        fmt.Println("Resuming the simulation.")
+                        pause = false
+                        cond.Broadcast()
+                        mu.Unlock()
+
+
+
+                    } else {
+                        fmt.Println("Pausing the simulation. Press 'p' again to resume.")
+                        pause = true
+                        mu.Unlock()
+                    }
+                }
+            case <-done:
+                return
+            }
+        }
+    }()
+
+
+
+    for i := 0; i < p.Turns; i++ {
+        for w := 0; w < p.Threads; w++ {
+            startY := w * sectionSize
+            endY := (w + 1) * sectionSize
+
+
+
+            if w == p.Threads-1 {
+                endY = p.ImageHeight
+            }
+
+
+
+            wg.Add(1)
+
+
+
+            go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond)
+
+
+
+        }
+
+
+
+        wg.Wait()
+
+
+
+        worldSlice, newWorld = newWorld, worldSlice
+
+
+
+        mu.Lock()
+        completedTurns = i + 1
+        aliveCells = calculateAliveCells(p, worldSlice)
+        mu.Unlock()
+
+
+
+        mu.Lock()
+        if mustQuit {
+            mu.Unlock()
+            break
+        }
+        mu.Unlock()
+
+
+
+        c.events <- TurnComplete{CompletedTurns: completedTurns}
+
+
+
+    }
+
+
+
+    //write to pgm file
+    c.ioCommand <- ioOutput
+    outputFilename := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+    c.ioFilename <- outputFilename
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            c.ioOutput <- worldSlice[row][column]
+        }
+    }
+
+
+
+    // Make sure that the Io has finished any output before exiting.
+    c.ioCommand <- ioCheckIdle
+    <-c.ioIdle
+
+
+
+    // TODO: Report the final state using FinalTurnCompleteEvent.
+    c.events <- FinalTurnComplete{CompletedTurns: completedTurns, Alive: aliveCells}
+    c.events <- ImageOutputComplete{CompletedTurns: completedTurns, Filename: outputFilename}
+    c.events <- StateChange{turn, Quitting}
+
+
+
+    // Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+    close(c.events)
+} is this fine
+
+
+Copilot said:
+
+It's much closer, but I see two issues.
+
+1. Potential deadlock on quit
+
+You have:
+
+Go
+} else if k == 'q' {
+    mu.Lock()
+    mustQuit = true
+    mu.Unlock()
+ 
+    mu.Lock()
+    pause = false
+    mu.Unlock()
+ 
+    done <- true
+    return
+}
+
+If workers are currently stuck in:
+
+Go
+for *pause {
+    cond.Wait()
+}
+
+then setting
+
+Go
+pause = false
+
+isn't enough.
+
+You must wake them:
+
+Go
+mu.Lock()
+pause = false
+cond.Broadcast()
+mu.Unlock()
+
+Otherwise they'll stay asleep forever and:
+
+Go
+wg.Wait()
+
+may never finish.
+
+2. Holding the lock slightly longer than needed
+
+This is okay:
+
+Go
+mu.Lock()
+for *pause {
+    cond.Wait()
+}
+mu.Unlock()
+
+This is the standard sync.Cond pattern.
+
+But I'd consider copying the state before the loop:
+
+Go
+mu.Lock()
+paused := *pause
+mu.Unlock()
+
+only if you're doing simple reads. For Cond, your current version is actually the textbook way.
+
+3. You're now sharing the pause state correctly ✅
+
+Before:
+
+Go
+pause bool
+
+was copied into every goroutine.
+
+Now:
+
+Go
+pause *bool
+
+and
+
+Go
+go calculateNextState(..., &pause, cond)
+
+means all workers see the same shared value.
+
+4. Will it pause immediately?
+
+Not exactly.
+
+Your worker checks only once per row:
+
+Go
+for row := startY; row < endY; row++ {
+ 
+    mu.Lock()
+    for *pause {
+        cond.Wait()
+    }
+    mu.Unlock()
+ 
+    // process row
+}
+
+So:
+
+Press p
+Worker finishes current row
+Reaches next iteration
+Pauses
+
+That's usually a very good compromise.
+
+5. One thing I would test
+
+Run:
+
+Shell
+go run -race .
+
+If there are any remaining synchronization issues around:
+
+Go
+worldSlice
+aliveCells
+completedTurns
+mustQuit
+pause
+
+the race detector will tell you.
+
+Overall: yes, the sync.Cond usage is now fundamentally correct. The main thing I'd change before calling it done is waking waiting workers during q with:
+
+Go
+pause = false
+cond.Broadcast()
+
+so quitting can't leave goroutines sleeping forever.
+
+You said:
+package gol
+
+
+
+import (
+    "fmt"
+    "sync"
+    "time"
+
+
+
+    "uk.ac.bris.cs/gameoflife/util"
+)
+
+
+
+type distributorChannels struct {
+    events     chan<- Event
+    ioCommand  chan<- ioCommand
+    ioIdle     <-chan bool
+    ioFilename chan<- string
+    ioOutput   chan<- uint8
+    ioInput    <-chan uint8
+    keyPresses <-chan rune
+}
+
+
+
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond) {
+
+
+
+    defer wg.Done()
+    mu.Lock()
+    paused := *pause
+    mu.Unlock()
+
+
+
+    for row := startY; row < endY; row++ {
+
+
+
+        for paused {
+            cond.Wait()
+        }
+
+
+
+        for column := 0; column < p.ImageWidth; column++ {
+            liveCells := 0
+            for dr := -1; dr <= 1; dr++ {
+                for dc := -1; dc <= 1; dc++ {
+                    if dr == 0 && dc == 0 {
+                        continue
+                    }
+                    nRow := (row + dr + p.ImageHeight) % p.ImageHeight
+                    nCol := (column + dc + p.ImageWidth) % p.ImageWidth
+                    if world[nRow][nCol] == 255 {
+                        liveCells++
+                    }
+                }
+            }
+            if world[row][column] == 255 {
+                if liveCells == 2 || liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            } else {
+                if liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            }
+        }
+    }
+}
+
+
+
+func calculateAliveCells(p Params, world [][]byte) []util.Cell {
+    cellCoordsSlice := []util.Cell{}
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            if world[row][column] == 255 {
+                cellCoordsSlice = append(cellCoordsSlice, util.Cell{X: column, Y: row})
+            }
+        }
+    }
+
+
+
+    return cellCoordsSlice
+}
+
+
+
+// distributor divides the work between workers and interacts with other goroutines.
+func distributor(p Params, c distributorChannels) {
+    // TODO: Create a 2D slice to store the world.
+    c.ioCommand <- ioInput
+    filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
+    c.ioFilename <- filename
+
+
+
+    worldSlice := make([][]byte, p.ImageHeight)
+    for i := 0; i < len(worldSlice); i++ {
+        worldSlice[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            worldSlice[row][column] = <-c.ioInput
+        }
+    }
+
+
+
+    turn := 0
+    c.events <- StateChange{turn, Executing}
+
+
+
+    // TODO: Execute all turns of the Game of Life.
+    newWorld := make([][]byte, p.ImageHeight)
+    for i := range newWorld {
+        newWorld[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    sectionSize := p.ImageHeight / p.Threads
+
+
+
+    var wg sync.WaitGroup
+    var mu sync.Mutex
+    var cond = sync.NewCond(&mu)
+
+
+
+    mustQuit := false
+    pause := false
+
+
+
+    completedTurns := 0
+    aliveCells := calculateAliveCells(p, worldSlice)
+
+
+
+    ticker := time.NewTicker(2 * time.Second)
+    done := make(chan bool)
+    defer ticker.Stop()
+    defer close(done)
+
+
+
+    go func() {
+        for {
+            select {
+            case <-done:
+                return
+            case <-ticker.C:
+                mu.Lock()
+                safecompletedTurns := completedTurns
+                safealiveCells := aliveCells
+                mu.Unlock()
+
+
+
+                c.events <- AliveCellsCount{CompletedTurns: safecompletedTurns, CellsCount: len(safealiveCells)}
+            }
+        }
+    }()
+
+
+
+    go func() {
+        for {
+            select {
+            case k := <-c.keyPresses:
+                fmt.Println("key received:", string(k))
+
+
+
+                if k == 's' {
+                    mu.Lock()
+                    safeTurns := completedTurns
+
+
+
+                    worldCopy := make([][]byte, p.ImageHeight)
+                    for r := range worldSlice {
+                        worldCopy[r] = make([]byte, p.ImageWidth)
+                        copy(worldCopy[r], worldSlice[r])
+                    }
+                    mu.Unlock()
+
+
+
+                    c.ioCommand <- ioOutput
+                    outputFilename := fmt.Sprintf("%dx%dx%d-snapshot", p.ImageWidth, p.ImageHeight, safeTurns)
+                    c.ioFilename <- outputFilename
+
+
+
+                    for row := 0; row < p.ImageHeight; row++ {
+                        for column := 0; column < p.ImageWidth; column++ {
+                            c.ioOutput <- worldCopy[row][column]
+                        }
+                    }
+
+
+
+                    c.ioCommand <- ioCheckIdle
+                    <-c.ioIdle
+                    c.events <- ImageOutputComplete{CompletedTurns: safeTurns, Filename: outputFilename}
+                } else if k == 'q' {
+                    mu.Lock()
+                    mustQuit = true
+                    mu.Unlock()
+
+
+
+                    mu.Lock()
+                    pause = false
+                    cond.Broadcast()
+                    mu.Unlock()
+
+
+
+                    done <- true
+                    return
+                } else if k == 'p' {
+                    mu.Lock()
+                    if pause {
+                        fmt.Println("Resuming the simulation.")
+                        pause = false
+                        cond.Broadcast()
+                        mu.Unlock()
+
+
+
+                    } else {
+                        fmt.Println("Pausing the simulation. Press 'p' again to resume.")
+                        pause = true
+                        mu.Unlock()
+                    }
+                }
+            case <-done:
+                return
+            }
+        }
+    }()
+
+
+
+    for i := 0; i < p.Turns; i++ {
+        for w := 0; w < p.Threads; w++ {
+            startY := w * sectionSize
+            endY := (w + 1) * sectionSize
+
+
+
+            if w == p.Threads-1 {
+                endY = p.ImageHeight
+            }
+
+
+
+            wg.Add(1)
+
+
+
+            go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond)
+
+
+
+        }
+
+
+
+        wg.Wait()
+
+
+
+        worldSlice, newWorld = newWorld, worldSlice
+
+
+
+        mu.Lock()
+        completedTurns = i + 1
+        aliveCells = calculateAliveCells(p, worldSlice)
+        mu.Unlock()
+
+
+
+        mu.Lock()
+        if mustQuit {
+            mu.Unlock()
+            break
+        }
+        mu.Unlock()
+
+
+
+        c.events <- TurnComplete{CompletedTurns: completedTurns}
+
+
+
+    }
+
+
+
+    //write to pgm file
+    c.ioCommand <- ioOutput
+    outputFilename := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+    c.ioFilename <- outputFilename
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            c.ioOutput <- worldSlice[row][column]
+        }
+    }
+
+
+
+    // Make sure that the Io has finished any output before exiting.
+    c.ioCommand <- ioCheckIdle
+    <-c.ioIdle
+
+
+
+    // TODO: Report the final state using FinalTurnCompleteEvent.
+    c.events <- FinalTurnComplete{CompletedTurns: completedTurns, Alive: aliveCells}
+    c.events <- ImageOutputComplete{CompletedTurns: completedTurns, Filename: outputFilename}
+    c.events <- StateChange{turn, Quitting}
+
+
+
+    // Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+    close(c.events)
+}
+
+
+Copilot said:
+
+This version actually has a serious bug with sync.Cond.
+
+You're doing:
+
+Go
+mu.Lock()
+paused := *pause
+mu.Unlock()
+ 
+for paused {
+    cond.Wait()
+}
+
+Problems:
+
+paused is a copy.
+paused never changes after that assignment.
+cond.Wait() must be called while holding the mutex.
+
+The standard pattern is:
+
+Go
+mu.Lock()
+for *pause {
+    cond.Wait()
+}
+mu.Unlock()
+
+So your worker should be:
+
+Go
+for row := startY; row < endY; row++ {
+ 
+    mu.Lock()
+    for *pause {
+        cond.Wait()
+    }
+    mu.Unlock()
+ 
+    // calculate row
+}
+Why?
+
+Suppose:
+
+Go
+*pause == true
+
+Worker reaches:
+
+Go
+for *pause {
+    cond.Wait()
+}
+
+Wait():
+
+Unlocks mu
+Sleeps
+Gets Broadcast()ed
+Re-locks mu
+Re-checks *pause
+
+That's exactly what you want.
+
+Another issue
+
+You are using the same mutex for:
+
+Go
+pause
+mustQuit
+aliveCells
+completedTurns
+
+That's okay for coursework.
+
+One more subtle thing
+
+When you resume:
+
+Go
+pause = false
+cond.Broadcast()
+
+make sure both happen while the lock is held:
+
+Go
+mu.Lock()
+pause = false
+cond.Broadcast()
+mu.Unlock()
+
+which you've already done. ✅
+
+The golden sync.Cond pattern
+
+Whenever you use a condition variable, remember:
+
+Go
+mu.Lock()
+for condition {
+    cond.Wait()
+}
+mu.Unlock()
+
+and
+
+Go
+mu.Lock()
+condition = false
+cond.Broadcast()
+mu.Unlock()
+
+Never:
+
+Go
+paused := *pause
+ 
+for paused {
+    cond.Wait()
+}
+
+because paused is just a snapshot and won't update when another goroutine changes *pause.
+
+So I'd change calculateNextState back to:
+
+Go
+for row := startY; row < endY; row++ {
+ 
+    mu.Lock()
+    for *pause {
+        cond.Wait()
+    }
+    mu.Unlock()
+ 
+    // process row
+}
+
+and you'll be using sync.Cond correctly.
+
+You said:
+why do we pas the address of the utex into conditional
+Copilot said:
+
+Because sync.Cond doesn't store any state itself. It needs a mutex to coordinate access to whatever condition you're waiting on.
+
+When you do:
+
+Go
+var mu sync.Mutex
+cond := sync.NewCond(&mu)
+
+you're telling the condition variable:
+
+"This is the lock that protects the condition I'm interested in."
+
+In your case, the condition is:
+
+Go
+pause == false
+What Wait() does
+
+When you call:
+
+Go
+cond.Wait()
+
+Go needs to:
+
+Unlock the mutex.
+Put the goroutine to sleep.
+Wake up when signalled.
+Re-lock the mutex.
+Return.
+
+It can only do that if it knows which mutex to unlock and lock.
+
+That's why you pass:
+
+Go
+&mu
+
+into:
+
+Go
+sync.NewCond(&mu)
+
+Without the mutex, this would be racy:
+
+Go
+if pause {
+    cond.Wait()
+}
+
+Imagine:
+
+Worker checks pause.
+pause is true.
+Before worker calls Wait(), another goroutine does:
+Go
+pause = false
+cond.Broadcast()
+Worker then calls Wait().
+
+Now the wakeup has already happened and the worker sleeps forever.
+
+The mutex prevents this kind of race.
+
+That's why the canonical pattern is:
+
+Go
+mu.Lock()
+ 
+for pause {
+    cond.Wait()
+}
+ 
+mu.Unlock()
+
+and:
+
+Go
+mu.Lock()
+ 
+pause = false
+cond.Broadcast()
+ 
+mu.Unlock()
+
+The lock ensures checking pause and going to sleep happen as one synchronized operation.
+
+A good mental model:
+
+Mutex = protects the variable (pause).
+Cond = puts goroutines to sleep and wakes them up.
+paused bool = the actual state you're waiting on.
+
+You said:
+but does ths not mess up the other locks as we are suing teh same mutex for everythign
+Copilot said:
+
+Yes, it can affect the other locks, but not usually in a bad way.
+
+Right now your mutex protects:
+
+Go
+pause
+mustQuit
+completedTurns
+aliveCells
+
+and is also used by:
+
+Go
+cond := sync.NewCond(&mu)
+
+That's perfectly valid.
+
+The key thing is that when a worker does:
+
+Go
+mu.Lock()
+for *pause {
+    cond.Wait()
+}
+mu.Unlock()
+
+cond.Wait() automatically unlocks the mutex while sleeping.
+
+So it behaves roughly like:
+
+Go
+mu.Unlock()
+sleep()
+mu.Lock()
+
+This means while workers are paused:
+
+Go
+pause = false
+completedTurns = ...
+mustQuit = true
+
+can still be accessed by other goroutines.
+
+If Wait() held the lock while sleeping, the entire program would deadlock.
+
+When would you want a separate mutex?
+
+If pause becomes a heavily used synchronization mechanism.
+
+For example:
+
+Go
+var pauseMu sync.Mutex
+var pauseCond = sync.NewCond(&pauseMu)
+ 
+var stateMu sync.Mutex
+
+Then:
+
+Go
+pauseMu
+
+protects only:
+
+Go
+paused
+
+and
+
+Go
+stateMu
+
+protects:
+
+Go
+completedTurns
+aliveCells
+mustQuit
+
+This reduces contention.
+
+For your coursework?
+
+I'd keep a single mutex:
+
+Go
+var mu sync.Mutex
+var cond = sync.NewCond(&mu)
+
+It's simpler and you're not doing enough work for lock contention to matter.
+
+The bigger concern isn't using the same mutex. The bigger concern is making sure you always follow the condition-variable pattern correctly:
+
+Go
+mu.Lock()
+for *pause {
+    cond.Wait()
+}
+mu.Unlock()
+
+and
+
+Go
+mu.Lock()
+*pause = false
+cond.Broadcast()
+mu.Unlock()
+
+Using the same mutex for both the shared state and the condition variable is actually the normal pattern in Go.
+
+You said:
+conditionals vs wiat groups
+Copilot said:
+
+sync.WaitGroup and sync.Cond solve completely different problems.
+
+WaitGroup
+
+Used when you want to wait for goroutines to finish.
+
+Go
+var wg sync.WaitGroup
+ 
+wg.Add(2)
+ 
+go worker1(&wg)
+go worker2(&wg)
+ 
+wg.Wait() // wait until both call Done()
+
+Think:
+
+"Tell me when all workers are done."
+
+For your GoL:
+
+Go
+wg.Add(1)
+go calculateNextState(...)
+ 
+wg.Wait()
+
+means:
+
+"Don't continue until all row calculations are complete."
+
+sync.Cond
+
+Used when you want goroutines to pause and resume based on some shared state.
+
+Go
+mu.Lock()
+for paused {
+    cond.Wait()
+}
+mu.Unlock()
+
+and:
+
+Go
+mu.Lock()
+paused = false
+cond.Broadcast()
+mu.Unlock()
+
+Think:
+
+"Sleep while paused."
+
+For your GoL workers:
+
+Go
+for row := startY; row < endY; row++ {
+ 
+    mu.Lock()
+    for paused {
+        cond.Wait()
+    }
+    mu.Unlock()
+ 
+    processRow(row)
+}
+Real-world analogy
+WaitGroup
+
+A teacher waits for all students to finish an exam.
+
+Plain Text
+Student finishes -> Done()
+Student finishes -> Done()
+Student finishes -> Done()
+ 
+Teacher -> Wait() returns
+
+The students never resume. They're finished.
+
+Condition Variable
+
+A teacher pauses an exam.
+
+Plain Text
+Teacher: Stop writing.
+Students wait.
+ 
+Teacher: Continue.
+Students resume.
+
+The work isn't finished. It's temporarily suspended.
+
+For your Game of Life
+
+You typically use both:
+
+Go
+var wg sync.WaitGroup
+var cond *sync.Cond
+WaitGroup → wait for all worker goroutines to finish a generation.
+Cond → pause/resume workers when p is pressed.
+
+They complement each other rather than replace each other.
+
+You said:
+package gol
+
+
+
+import (
+    "fmt"
+    "sync"
+    "time"
+
+
+
+    "uk.ac.bris.cs/gameoflife/util"
+
+
+eneylonlwin@LAPTOP-VHV62PPG:~/goProjects/goCoursework$ go run .
+2026/11/04 15:21:34 [Main] Threads    8
+2026/11/04 15:21:34 [Main] Width      512
+2026/11/04 15:21:34 [Main] Height     512
+2026/11/04 15:21:34 [Main] Turns      10000000000
+2026/11/04 15:21:34 [IO] File 512x512.pgm input done
+2026/11/04 15:21:36 [Event] Completed Turns 0        Executing
+2026/11/04 15:21:36 [Event] Completed Turns 24       Alive Cells 6756    Avg233513 turns/sec
+2026/11/04 15:21:38 [Event] Completed Turns 49       Alive Cells 6850    Avg   27 turns/sec
+key received: p
+Pausing the simulation. Press 'p' again to resume.
+2026/11/04 15:21:40 [Event] Completed Turns 65       Alive Cells 6808    Avg   17 turns/sec
+2026/11/04 15:21:42 [Event] Completed Turns 65       Alive Cells 6808    Avg    7 turns/sec
+2026/11/04 15:21:44 [Event] Completed Turns 65       Alive Cells 6808    Avg    3 turns/sec
+2026/11/04 15:21:46 [Event] Completed Turns 65       Alive Cells 6808    Avg    0 turns/sec
+2026/11/04 15:21:48 [Event] Completed Turns 65       Alive Cells 6808    Avg    0 turns/sec
+2026/11/04 15:21:50 [Event] Completed Turns 65       Alive Cells 6808    Avg    0 turns/sec
+2026/11/04 15:21:52 [Event] Completed Turns 65       Alive Cells 6808    Avg    0 turns/sec
+)
+
+
+
+type distributorChannels struct {
+    events     chan<- Event
+    ioCommand  chan<- ioCommand
+    ioIdle     <-chan bool
+    ioFilename chan<- string
+    ioOutput   chan<- uint8
+    ioInput    <-chan uint8
+    keyPresses <-chan rune
+}
+
+
+
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond) {
+
+
+
+    defer wg.Done()
+
+
+
+    for row := startY; row < endY; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            liveCells := 0
+            for dr := -1; dr <= 1; dr++ {
+                for dc := -1; dc <= 1; dc++ {
+
+
+
+                    mu.Lock()
+                    for *pause {
+                        cond.Wait()
+                    }
+                    mu.Unlock()
+
+
+
+                    if dr == 0 && dc == 0 {
+                        continue
+                    }
+                    nRow := (row + dr + p.ImageHeight) % p.ImageHeight
+                    nCol := (column + dc + p.ImageWidth) % p.ImageWidth
+                    if world[nRow][nCol] == 255 {
+                        liveCells++
+                    }
+                }
+            }
+            if world[row][column] == 255 {
+                if liveCells == 2 || liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            } else {
+                if liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            }
+        }
+    }
+}
+
+
+
+func calculateAliveCells(p Params, world [][]byte) []util.Cell {
+    cellCoordsSlice := []util.Cell{}
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            if world[row][column] == 255 {
+                cellCoordsSlice = append(cellCoordsSlice, util.Cell{X: column, Y: row})
+            }
+        }
+    }
+
+
+
+    return cellCoordsSlice
+}
+
+
+
+// distributor divides the work between workers and interacts with other goroutines.
+func distributor(p Params, c distributorChannels) {
+    // TODO: Create a 2D slice to store the world.
+    c.ioCommand <- ioInput
+    filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
+    c.ioFilename <- filename
+
+
+
+    worldSlice := make([][]byte, p.ImageHeight)
+    for i := 0; i < len(worldSlice); i++ {
+        worldSlice[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            worldSlice[row][column] = <-c.ioInput
+        }
+    }
+
+
+
+    turn := 0
+    c.events <- StateChange{turn, Executing}
+
+
+
+    // TODO: Execute all turns of the Game of Life.
+    newWorld := make([][]byte, p.ImageHeight)
+    for i := range newWorld {
+        newWorld[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    sectionSize := p.ImageHeight / p.Threads
+
+
+
+    var wg sync.WaitGroup
+    var mu sync.Mutex
+    var cond = sync.NewCond(&mu)
+
+
+
+    mustQuit := false
+    pause := false
+
+
+
+    completedTurns := 0
+    aliveCells := calculateAliveCells(p, worldSlice)
+
+
+
+    ticker := time.NewTicker(2 * time.Second)
+    done := make(chan bool)
+    defer ticker.Stop()
+    defer close(done)
+
+
+
+    go func() {
+        for {
+            select {
+            case <-done:
+                return
+            case <-ticker.C:
+                mu.Lock()
+                for pause {
+                    cond.Wait()
+                }
+                mu.Unlock()
+                
+                mu.Lock()
+                safecompletedTurns := completedTurns
+                safealiveCells := aliveCells
+                mu.Unlock()
+
+
+
+                c.events <- AliveCellsCount{CompletedTurns: safecompletedTurns, CellsCount: len(safealiveCells)}
+            }
+        }
+    }() 
+
+
+
+    go func() {
+        for {
+            select {
+            case k := <-c.keyPresses:
+                fmt.Println("key received:", string(k))
+
+
+
+                if k == 's' {
+                    mu.Lock()
+                    safeTurns := completedTurns
+
+
+
+                    worldCopy := make([][]byte, p.ImageHeight)
+                    for r := range worldSlice {
+                        worldCopy[r] = make([]byte, p.ImageWidth)
+                        copy(worldCopy[r], worldSlice[r])
+                    }
+                    mu.Unlock()
+
+
+
+                    c.ioCommand <- ioOutput
+                    outputFilename := fmt.Sprintf("%dx%dx%d-snapshot", p.ImageWidth, p.ImageHeight, safeTurns)
+                    c.ioFilename <- outputFilename
+
+
+
+                    for row := 0; row < p.ImageHeight; row++ {
+                        for column := 0; column < p.ImageWidth; column++ {
+                            c.ioOutput <- worldCopy[row][column]
+                        }
+                    }
+
+
+
+                    c.ioCommand <- ioCheckIdle
+                    <-c.ioIdle
+                    c.events <- ImageOutputComplete{CompletedTurns: safeTurns, Filename: outputFilename}
+                } else if k == 'q' {
+                    mu.Lock()
+                    mustQuit = true
+                    mu.Unlock()
+
+
+
+                    mu.Lock()
+                    pause = false
+                    cond.Broadcast()
+                    mu.Unlock()
+
+
+
+                    done <- true
+                    return
+                } else if k == 'p' {
+                    mu.Lock()
+                    if pause {
+                        fmt.Println("Resuming the simulation.")
+                        pause = false
+                        cond.Broadcast()
+                        mu.Unlock()
+
+
+
+                    } else {
+                        fmt.Println("Pausing the simulation. Press 'p' again to resume.")
+                        pause = true
+                        mu.Unlock()
+                    }
+                }
+            case <-done:
+                return
+            }
+        }
+    }()
+
+
+
+    for i := 0; i < p.Turns; i++ {
+        for w := 0; w < p.Threads; w++ {
+            startY := w * sectionSize
+            endY := (w + 1) * sectionSize
+
+
+
+            if w == p.Threads-1 {
+                endY = p.ImageHeight
+            }
+
+
+
+            wg.Add(1)
+
+
+
+            go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond)
+
+
+
+        }
+
+
+
+        wg.Wait()
+
+
+
+        worldSlice, newWorld = newWorld, worldSlice
+
+
+
+        mu.Lock()
+        completedTurns = i + 1
+        aliveCells = calculateAliveCells(p, worldSlice)
+        mu.Unlock()
+
+
+
+        mu.Lock()
+        if mustQuit {
+            mu.Unlock()
+            break
+        }
+        mu.Unlock()
+
+
+
+        c.events <- TurnComplete{CompletedTurns: completedTurns}
+
+
+
+    }
+
+
+
+    //write to pgm file
+    c.ioCommand <- ioOutput
+    outputFilename := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+    c.ioFilename <- outputFilename
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            c.ioOutput <- worldSlice[row][column]
+        }
+    }
+
+
+
+    // Make sure that the Io has finished any output before exiting.
+    c.ioCommand <- ioCheckIdle
+    <-c.ioIdle
+
+
+
+    // TODO: Report the final state using FinalTurnCompleteEvent.
+    c.events <- FinalTurnComplete{CompletedTurns: completedTurns, Alive: aliveCells}
+    c.events <- ImageOutputComplete{CompletedTurns: completedTurns, Filename: outputFilename}
+    c.events <- StateChange{turn, Quitting}
+
+
+
+    // Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+    close(c.events)
+}
+
+
+Copilot said:
+
+The good news is your output suggests the pause is actually working:
+
+Plain Text
+Pausing the simulation. Press 'p' again to resume.
+Completed Turns 65 Alive Cells 6808
+Completed Turns 65 Alive Cells 6808
+Completed Turns 65 Alive Cells 6808
+
+Notice:
+
+Plain Text
+Completed Turns 65
+Completed Turns 65
+Completed Turns 65
+
+The turn count is not increasing.
+
+That means the simulation has stopped at turn 65.
+
+What's still running is your ticker goroutine:
+
+Go
+case <-ticker.C:
+    c.events <- AliveCellsCount{
+        CompletedTurns: safecompletedTurns,
+        CellsCount: len(safealiveCells),
+    }
+
+Every 2 seconds it wakes up and reports the current state, which remains:
+
+Plain Text
+Turns 65
+Alive Cells 6808
+
+because nothing is changing.
+
+One problem in your worker
+
+You've got:
+
+Go
+mu.Lock()
+for *pause {
+    cond.Wait()
+}
+mu.Unlock()
+
+inside:
+
+Go
+for dr := -1; dr <= 1; dr++ {
+    for dc := -1; dc <= 1; dc++ {
+
+which means you're checking the pause state 8 times per cell.
+
+For a 512×512 board:
+
+Plain Text
+512 × 512 × 8 = 2,097,152 lock operations per generation
+
+That's very expensive.
+
+Move it outside the column loop, e.g.:
+
+Go
+for row := startY; row < endY; row++ {
+ 
+    mu.Lock()
+    for *pause {
+        cond.Wait()
+    }
+    mu.Unlock()
+ 
+    for column := 0; column < p.ImageWidth; column++ {
+        ...
+    }
+}
+
+Much cleaner.
+
+Another subtle issue
+
+Your ticker uses:
+
+Go
+mu.Lock()
+for pause {
+    cond.Wait()
+}
+mu.Unlock()
+
+which means the ticker also pauses.
+
+That's probably what you want.
+
+But make sure you're not holding the mutex while sending an event:
+
+Good:
+
+Go
+mu.Lock()
+safecompletedTurns := completedTurns
+safealiveCells := aliveCells
+mu.Unlock()
+ 
+c.events <- AliveCellsCount{...}
+
+which you already do.
+
+How to tell if pause works
+
+Press p.
+
+If you get:
+
+Plain Text
+65
+65
+65
+65
+
+the simulation is paused.
+
+If you were seeing:
+
+Plain Text
+65
+66
+67
+68
+
+then it would not be paused.
+
+From your output:
+
+Plain Text
+65
+65
+65
+65
+
+I'd say the condition variable is stopping the workers correctly. The thing that confused you is that the statistics goroutine is still printing snapshots of the unchanged state.
+
+
+============================================================
+SEPARATE CONVERSATION: Snapshot / race condition
+============================================================
+
+You said:
+so for the snapshot would using the current worldslice be smart or woudli sue the rpir itneration or what does it want by snapshot
+Copilot said:
+
+From the Bristol GoL coursework perspective, a snapshot should be the current visible world state at the moment s is pressed.
+
+Not:
+
+the previous generation
+the next generation
+a partially-computed generation
+
+but the world that corresponds to the current turn number.
+
+Looking at your implementation:
+
+Go
+wg.Wait()
+ 
+worldSlice, newWorld = newWorld, worldSlice
+ 
+completedTurns = i + 1
+
+After this point:
+
+Go
+worldSlice
+
+contains the world for turn completedTurns.
+
+So if:
+
+Go
+CompletedTurns == 89
+
+then the snapshot file:
+
+Plain Text
+512x512x89.pgm
+
+should contain exactly the board state for turn 89.
+
+The reason the tests pass when you do:
+
+Go
+safeTurns := completedTurns
+ 
+copy(worldSlice)
+
+is that you're snapshotting the current world and naming it with the current turn.
+
+That's what the tests expect.
+
+The subtle issue is what happens when you press s in the middle of a generation.
+
+Suppose:
+
+Plain Text
+completedTurns = 89
+
+Workers are currently computing turn 90:
+
+Go
+read worldSlice   // turn 89
+write newWorld    // turn 90
+
+In that situation:
+
+Go
+worldSlice
+
+still contains the fully completed turn 89.
+
+So using:
+
+Go
+worldSlice
+
+for the snapshot is actually the correct thing to do.
+
+You should not use:
+
+Go
+newWorld
+
+because it's only partially computed.
+
+And you should not try to reconstruct the previous generation.
+
+A useful mental model:
+
+Plain Text
+worldSlice = last completed generation
+newWorld   = generation currently being built
+
+Therefore when s is pressed:
+
+Go
+copy(worldSlice)
+
+is usually exactly what the coursework wants for the snapshot.
+
+You said:
+but does tht not lead to race conditions
+Copilot said:
+
+Yes, potentially. That's the subtle issue.
+
+Let's separate memory races from logical correctness.
+
+During a generation
+
+Your workers do:
+
+Go
+read worldSlice
+write newWorld
+
+They never write to worldSlice.
+
+So while turn 90 is being computed:
+
+Plain Text
+worldSlice = completed turn 89
+newWorld   = partially computed turn 90
+
+Logically, taking a snapshot of worldSlice is exactly what you want, because it's the last completed state.
+
+The race risk
+
+The dangerous point is here:
+
+Go
+worldSlice, newWorld = newWorld, worldSlice
+
+Suppose:
+
+Thread A (snapshot)
+
+Go
+copy(worldSlice[0], ...)
+
+while simultaneously
+
+Thread B (distributor)
+
+Go
+worldSlice, newWorld = newWorld, worldSlice
+
+Now the snapshot may read some rows from the old world and some from the new world.
+
+That would be a race.
+
+Why it often works anyway
+
+In your current design, the swap happens only in the distributor goroutine:
+
+Go
+wg.Wait()
+worldSlice, newWorld = newWorld, worldSlice
+
+and snapshots happen relatively rarely.
+
+So the window is tiny.
+
+But from a correctness perspective, yes, there is a potential race.
+
+The proper fix
+
+When taking a snapshot:
+
+Go
+mu.Lock()
+ 
+safeTurns := completedTurns
+ 
+worldCopy := make([][]byte, p.ImageHeight)
+for r := range worldSlice {
+    worldCopy[r] = make([]byte, p.ImageWidth)
+    copy(worldCopy[r], worldSlice[r])
+}
+ 
+mu.Unlock()
+
+and ensure the distributor also holds the same mutex when it swaps worlds:
+
+Go
+mu.Lock()
+worldSlice, newWorld = newWorld, worldSlice
+completedTurns = i + 1
+aliveCells = calculateAliveCells(...)
+mu.Unlock()
+
+Then:
+
+snapshot can't copy while the swap occurs
+swap can't occur while snapshot is copying
+
+The lock doesn't need to protect every cell access in the workers because workers only read worldSlice and write newWorld.
+
+What really needs protection is:
+
+Go
+worldSlice
+newWorld
+completedTurns
+
+when they're being swapped or copied.
+
+So your intuition is correct: copying worldSlice is the right snapshot source, but if you want it to be race-free, the snapshot copy and the worldSlice/newWorld swap should be synchronized with the same mutex.
+
+You said:
+so what does takigna  snapshot mean it is teh last genreted thing is teh snapshot as world slice inst changed until the very edn, is it not possiel that world slice changes mid slice swap manign race
+Copilot said:
+
+You're thinking about exactly the right thing.
+
+The answer depends on what worldSlice represents in your design.
+
+During computation
+
+At the start of a turn:
+
+Go
+worldSlice = turn 89
+newWorld   = empty
+
+Workers do:
+
+Go
+read worldSlice
+write newWorld
+
+They never modify worldSlice.
+
+After all workers finish:
+
+Go
+wg.Wait()
+
+you do:
+
+Go
+worldSlice, newWorld = newWorld, worldSlice
+
+Now:
+
+Go
+worldSlice = turn 90
+newWorld   = old turn 89 buffer
+So what should a snapshot contain?
+
+The latest completed generation.
+
+That means:
+
+Go
+worldSlice
+
+because newWorld may still be half-computed.
+
+So conceptually:
+
+Go
+snapshot = copy(worldSlice)
+
+is correct.
+
+Where does the race come from?
+
+Not from the workers.
+
+The workers only do:
+
+Go
+read worldSlice
+
+Reading concurrently is fine.
+
+The race comes from the swap:
+
+Go
+worldSlice, newWorld = newWorld, worldSlice
+
+Imagine:
+
+Snapshot goroutine
+Go
+copy row 0 from worldSlice
+copy row 1 from worldSlice
+Distributor goroutine
+Go
+worldSlice, newWorld = newWorld, worldSlice
+Snapshot goroutine
+Go
+copy row 2 from worldSlice
+
+Now some rows may come from the old board and some from the new board.
+
+That's the race you're worried about.
+
+Does the slice swap happen "mid-copy"?
+
+Potentially yes.
+
+The operation:
+
+Go
+worldSlice = newWorld
+
+isn't changing millions of cells.
+
+It's just changing the slice header reference.
+
+But if one goroutine is reading:
+
+Go
+worldSlice
+
+while another is reassigning:
+
+Go
+worldSlice
+
+that's still an unsynchronised access.
+
+The clean fix
+
+Protect these operations with the same mutex:
+
+Go
+mu.Lock()
+ 
+worldSlice, newWorld = newWorld, worldSlice
+completedTurns = i + 1
+ 
+mu.Unlock()
+
+and
+
+Go
+mu.Lock()
+ 
+safeTurns := completedTurns
+ 
+copy(worldSlice)
+ 
+mu.Unlock()
+
+Now either:
+
+snapshot copies first,
+or swap happens first,
+
+but never both simultaneously.
+
+Important observation
+
+Because your workers never write to worldSlice, you do not need to lock every cell access.
+
+The thing that needs protection is:
+
+Go
+worldSlice variable itself
+newWorld variable itself
+completedTurns
+
+at the moment they're swapped/copied.
+
+So your intuition is correct:
+
+"Isn't it possible that worldSlice changes mid-slice-swap causing a race?"
+
+Yes. That's the actual race to worry about. The workers reading cells are generally not the problem. The problem is one goroutine copying worldSlice while another goroutine executes:
+
+Go
+worldSlice, newWorld = newWorld, worldSlice
+
+at the same time.
+
+You said:
+but the slice swap isnt a cpy but rather a pointer switch so it should be ine
+Copilot said:
+
+You're mostly right.
+
+The swap itself:
+
+Go
+worldSlice, newWorld = newWorld, worldSlice
+
+does not copy the entire board. It's just swapping slice headers (effectively pointers + length + capacity).
+
+So this operation is very fast.
+
+The subtle issue is not:
+
+"Will row 1 be old and row 2 be new?"
+
+That cannot happen because the swap is atomic at the Go statement level.
+
+The real concern is:
+
+Go
+// Snapshot goroutine
+copy(worldCopy[r], worldSlice[r])
+
+while another goroutine does:
+
+Go
+worldSlice, newWorld = newWorld, worldSlice
+
+at the same time.
+
+Now you've got one goroutine reading the variable worldSlice while another goroutine is writing the variable worldSlice.
+
+That's a data race.
+
+The copied data won't be "half-swapped", but the Go race detector still considers this unsafe.
+
+However, for your particular implementation there's an important observation:
+
+Workers do:
+
+Go
+read worldSlice
+write newWorld
+
+and never:
+
+Go
+write worldSlice
+
+So if you're taking a snapshot of:
+
+Go
+worldSlice
+
+you're copying a board that isn't being modified by workers.
+
+That's actually a pretty good design.
+
+I think the bigger question is:
+
+Can the distributor swap worlds while the snapshot goroutine is copying?
+
+If the answer is yes, then you should synchronize:
+
+Go
+mu.Lock()
+worldSlice, newWorld = newWorld, worldSlice
+completedTurns = i + 1
+mu.Unlock()
+
+and
+
+Go
+mu.Lock()
+copy worldSlice
+mu.Unlock()
+
+with the same mutex.
+
+In practice, for the coursework, I'd expect:
+
+Go
+worldSlice
+
+to represent the latest completed generation and therefore be the correct thing to snapshot.
+
+So your intuition is correct:
+
+The swap is just a pointer switch, not a huge copy.
+
+Yes.
+
+The race isn't about partially copied cell contents. The race is about one goroutine reading the worldSlice variable while another goroutine reassigns it. Whether that matters enough to fail the coursework depends on whether the race detector is used in the tests.
+
+You said:
+so beacuse world slice is never edited itself there is not data race
+Copilot said:
+
+Almost.
+
+You're correct that the cell data in worldSlice isn't being modified by workers.
+
+Workers do:
+
+Go
+read worldSlice
+write newWorld
+
+So this is safe:
+
+Go
+if world[nRow][nCol] == 255 {
+    liveCells++
+}
+
+because it's just concurrent reads.
+
+The subtle distinction is:
+
+No race on the board contents
+
+Workers never do:
+
+Go
+worldSlice[row][col] = ...
+
+so the underlying board data isn't being modified.
+
+Possible race on the variable itself
+
+This line modifies the worldSlice variable:
+
+Go
+worldSlice, newWorld = newWorld, worldSlice
+
+A snapshot goroutine might simultaneously do:
+
+Go
+copy(worldCopy[r], worldSlice[r])
+
+So one goroutine is:
+
+Go
+READ worldSlice
+
+while another is:
+
+Go
+WRITE worldSlice
+
+That's technically a data race.
+
+In practice
+
+If your snapshot is taken while paused:
+
+Go
+pause = true
+
+then the simulation isn't progressing to the swap point:
+
+Go
+worldSlice, newWorld = newWorld, worldSlice
+
+So the snapshot is likely safe.
+
+If snapshots can be taken while the simulation is running, then there is a small race window around the swap.
+
+What the race detector would think
+
+The race detector cares about:
+
+Go
+goroutine A: reads worldSlice
+goroutine B: writes worldSlice
+
+not whether the underlying board cells change.
+
+So:
+
+Go
+worldSlice[row][col]
+
+may contain immutable data,
+
+but
+
+Go
+worldSlice = somethingElse
+
+is still a write to shared memory.
+
+So the precise answer is:
+
+Because worldSlice's contents are never modified, there is no race on the cell data.
+
+✅ Correct.
+
+But:
+
+There could still be a race on the worldSlice slice variable during worldSlice, newWorld = newWorld, worldSlice.
+
+✅ Also correct.
+
+Those are two different things.
+
+You said:
+how do i prevent this race condition from taking snpashot during simulation
+Copilot said:
+
+The cleanest way is to protect the swap and the snapshot copy with the same mutex.
+
+Right now you have:
+
+Go
+// distributor
+worldSlice, newWorld = newWorld, worldSlice
+
+and
+
+Go
+// snapshot goroutine
+copy(worldCopy[r], worldSlice[r])
+
+If they happen simultaneously, you've got:
+
+Plain Text
+goroutine A: reads worldSlice
+goroutine B: writes worldSlice
+
+which is a race.
+
+Option 1 (recommended)
+
+Lock around the swap:
+
+Go
+mu.Lock()
+worldSlice, newWorld = newWorld, worldSlice
+completedTurns = i + 1
+aliveCells = calculateAliveCells(p, worldSlice)
+mu.Unlock()
+
+and lock around the snapshot copy:
+
+Go
+mu.Lock()
+ 
+safeTurns := completedTurns
+ 
+worldCopy := make([][]byte, p.ImageHeight)
+for r := range worldSlice {
+    worldCopy[r] = make([]byte, p.ImageWidth)
+    copy(worldCopy[r], worldSlice[r])
+}
+ 
+mu.Unlock()
+
+Now:
+
+Plain Text
+snapshot copy
+    OR
+slice swap
+
+can happen, but never both at once.
+
+Why this works
+
+Workers do:
+
+Go
+read worldSlice
+write newWorld
+
+They never write to:
+
+Go
+worldSlice
+
+So you do not need to lock every cell lookup:
+
+Go
+world[nRow][nCol]
+
+That would destroy performance.
+
+You only need to synchronize access to:
+
+Go
+worldSlice
+newWorld
+completedTurns
+
+when you're changing which slice represents the current world.
+
+Even better
+
+Use a separate mutex just for world state:
+
+Go
+var worldMu sync.Mutex
+
+Then:
+
+Go
+worldMu.Lock()
+worldSlice, newWorld = newWorld, worldSlice
+worldMu.Unlock()
+
+and:
+
+Go
+worldMu.Lock()
+copy worldSlice
+worldMu.Unlock()
+
+while keeping:
+
+Go
+pause
+cond
+mustQuit
+
+on your existing mutex.
+
+That avoids mixing pause logic with snapshot logic.
+
+So the answer is:
+
+No race exists on the cell contents because workers only read worldSlice. The race is on the worldSlice variable itself when you swap it. Prevent it by locking both the slice swap and the snapshot copy with the same mutex.
+
+You said:
+eneylonlwin@LAPTOP-VHV62PPG:~/goProjects/goCoursework$ go test ./tests -v -run TestKeyboard -sdl
+=== RUN   TestKeyboard
+=== RUN   TestKeyboard/p
+    util_test.go:409: Testing for first StateChange Executing event
+    util_test.go:278: [Event] Completed Turns 0        Executing
+    util_test.go:460: Testing for StateChange Paused event
+key received: p
+Pausing the simulation. Press 'p' again to resume.
+    util_test.go:278: [Event] Completed Turns 0        Paused
+    util_test.go:438: Testing for StateChange Executing event
+key received: p
+Resuming the simulation.
+    util_test.go:278: [Event] Completed Turns 0        Executing
+=== RUN   TestKeyboard/s
+    util_test.go:409: Testing for first StateChange Executing event
+    util_test.go:278: [Event] Completed Turns 0        Executing
+    util_test.go:568: Testing image output
+key received: s
+    util_test.go:272: [Event] Completed Turns 83       File 512x512x83.pgm output done
+    util_test.go:660: ERROR At turn 83 expected 6683 alive cells in output PGM image, got 6653 instead
+key received: q
+=== RUN   TestKeyboard/q
+    util_test.go:409: Testing for first StateChange Executing event
+    util_test.go:278: [Event] Completed Turns 0        Executing
+    util_test.go:568: Testing image output
+key received: q
+    util_test.go:278: [Event] Completed Turns 83       Quitting
+    util_test.go:275: [Event] Completed Turns 84       Final Turn Complete
+    util_test.go:272: [Event] Completed Turns 84       File 512x512x100000000.pgm output done
+    util_test.go:278: [Event] Completed Turns 0        Quitting
+    util_test.go:660: ERROR Filename is not correct
+    util_test.go:78: ERROR open out/512x512x84.pgm: no such file or directory
+
+
+Copilot said:
+
+You've fixed the pause test. Now the remaining failures are different.
+
+s key failure
+ERROR At turn 83 expected 6683 alive cells in output PGM image, got 6653 instead
+
+
+This means:
+
+The file was created.
+The filename is now correct.
+The contents of the snapshot are wrong.
+
+A difference of only 30 cells strongly suggests a race condition.
+
+Looking at your snapshot code:
+
+Go
+mu.Lock()
+safeTurns := completedTurns
+ 
+worldCopy := make([][]byte, p.ImageHeight)
+for r := range worldSlice {
+    worldCopy[r] = make([]byte, p.ImageWidth)
+    copy(worldCopy[r], worldSlice[r])
+}
+mu.Unlock()
+
+The problem is that your workers never lock mu when reading/writing worldSlice and newWorld.
+
+So this mutex is not actually protecting the board state. The snapshot goroutine may be copying while a turn is being calculated, giving a partially updated board.
+
+q key failure
+[Event] Completed Turns 84 Final Turn Complete
+[Event] Completed Turns 84 File 512x512x100000000.pgm output done
+
+ERROR open out/512x512x84.pgm: no such file or directory
+
+
+Your quit output file name is:
+
+Go
+outputFilename := fmt.Sprintf(
+    "%dx%dx%d",
+    p.ImageWidth,
+    p.ImageHeight,
+    p.Turns,
+)
+
+Notice:
+
+Go
+p.Turns
+
+You're using the requested number of turns:
+
+100000000
+
+
+instead of the actual completed turns:
+
+84
+
+
+The coursework expects the output file for quit to be named using the turn reached when quitting.
+
+You probably need:
+
+Go
+outputFilename := fmt.Sprintf(
+    "%dx%dx%d",
+    p.ImageWidth,
+    p.ImageHeight,
+    completedTurns,
+)
+
+not:
+
+Go
+p.Turns
+Most likely fixes
+Fix 1
+
+When writing the final image:
+
+Go
+outputFilename := fmt.Sprintf(
+    "%dx%dx%d",
+    p.ImageWidth,
+    p.ImageHeight,
+    completedTurns,
+)
+Fix 2
+
+Protect snapshot creation from concurrent simulation updates.
+
+The cleanest approach for this coursework is usually:
+
+pause simulation
+take snapshot
+resume simulation
+
+or ensure the copied world is taken at a turn boundary rather than while workers are actively computing.
+
+I'd run:
+
+Shell
+go test -race ./tests -run TestKeyboard/s -sdl
+
+I strongly suspect the race detector will immediately complain around the snapshot code and board state access.
+
+You said:
+i dont udnerstad i thout the u lock loks world lsice as well>
+Copilot said:
+
+A mutex only protects data if everyone who accesses that data uses the same mutex.
+
+For example:
+
+Go
+mu.Lock()
+worldSlice[0][0] = 255
+mu.Unlock()
+
+is protected.
+
+But your workers are doing:
+
+Go
+newWorld[row][column] = ...
+
+with no lock.
+
+At the same time your snapshot goroutine is doing:
+
+Go
+mu.Lock()
+ 
+copy(worldCopy[r], worldSlice[r])
+ 
+mu.Unlock()
+
+The lock only protects the copy operation. It does not stop workers from modifying worldSlice or newWorld because the workers never acquire mu.
+
+Think of a mutex like a bathroom key:
+
+Plain Text
+Person A uses key ✅
+Person B ignores key ❌
+
+The key doesn't magically stop Person B entering.
+
+Everyone has to agree to use it.
+
+In your code the variables currently protected by mu are approximately:
+
+Go
+pause
+mustQuit
+completedTurns
+aliveCells
+
+because every access is wrapped in:
+
+Go
+mu.Lock()
+...
+mu.Unlock()
+
+But the board isn't:
+
+Go
+worldSlice
+newWorld
+
+because workers access those directly.
+
+The reason your snapshot is probably failing is:
+
+Simulation is running.
+s is pressed.
+Snapshot goroutine starts copying worldSlice.
+Meanwhile a turn is being completed and worldSlice, newWorld = newWorld, worldSlice happens.
+Snapshot gets a board that's between generations.
+
+Hence:
+
+Plain Text
+expected 6683 alive cells
+got 6653
+
+which is a classic symptom of reading state while it's changing.
+
+I'd actually verify this with:
+
+Shell
+go test -race ./tests -run TestKeyboard/s -sdl
+
+If I'm right, the race detector should complain about accesses involving the world state.
+
+The key takeaway:
+
+A mutex doesn't protect variables automatically. It only protects code sections where every reader and writer agrees to lock the mutex before touching the data.
+
+You said:
+so how do i access the world lscie snapshot proeply ot pass the test
+Copilot said:
+
+The issue is that the keyboard test expects the snapshot to represent a consistent completed turn.
+
+Right now when s is pressed you're doing:
+
+Go
+worldCopy := make([][]byte, p.ImageHeight)
+for r := range worldSlice {
+    worldCopy[r] = make([]byte, p.ImageWidth)
+    copy(worldCopy[r], worldSlice[r])
+}
+
+But the simulation is still running concurrently.
+
+Your workers are reading from:
+
+Go
+worldSlice
+
+while the distributor later does:
+
+Go
+worldSlice, newWorld = newWorld, worldSlice
+
+So the snapshot can catch the board halfway through a generation transition.
+
+Simplest fix
+
+Pause the simulation before taking the snapshot.
+
+Something like:
+
+Go
+mu.Lock()
+pause = true
+mu.Unlock()
+
+Wait for the currently-running generation to finish:
+
+Go
+wg.Wait()
+
+Then copy the board.
+
+However, this can get messy because your keyboard goroutine doesn't naturally have access to the current generation's wait state.
+
+Better approach
+
+Make snapshots happen from the distributor thread.
+
+Instead of the keyboard goroutine directly reading worldSlice, send a request:
+
+Go
+snapshotRequested = true
+
+Then inside the main distributor loop, after:
+
+Go
+wg.Wait()
+
+and after:
+
+Go
+worldSlice, newWorld = newWorld, worldSlice
+
+check:
+
+Go
+if snapshotRequested {
+    saveSnapshot(worldSlice)
+    snapshotRequested = false
+}
+
+At this point:
+
+all workers have finished
+worldSlice is stable
+the turn has completed
+
+So the snapshot will exactly match the expected state.
+
+The quit bug
+
+You also have:
+
+Go
+outputFilename := fmt.Sprintf(
+    "%dx%dx%d",
+    p.ImageWidth,
+    p.ImageHeight,
+    p.Turns,
+)
+
+When quitting at turn 84, this becomes:
+
+Plain Text
+512x512x100000000.pgm
+
+but the tests expect:
+
+Plain Text
+512x512x84.pgm
+
+Use:
+
+Go
+completedTurns
+
+instead of:
+
+Go
+p.Turns
+
+when naming the final output file.
+
+I'd fix the filename bug first, then move snapshot creation to occur immediately after wg.Wait() in the distributor. That is the point where the world state is guaranteed to be consistent, and it's exactly what the keyboard tests are expecting.
+
+You said:
+package gol
+
+
+
+import (
+    "fmt"
+    "sync"
+    "time"
+
+
+
+    "uk.ac.bris.cs/gameoflife/util"
+)
+
+
+
+type distributorChannels struct {
+    events     chan<- Event
+    ioCommand  chan<- ioCommand
+    ioIdle     <-chan bool
+    ioFilename chan<- string
+    ioOutput   chan<- uint8
+    ioInput    <-chan uint8
+    keyPresses <-chan rune
+}
+
+
+
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond) {
+
+
+
+    defer wg.Done()
+
+
+
+    for row := startY; row < endY; row++ {
+
+
+
+        mu.Lock()
+        for *pause {
+            cond.Wait()
+        }
+        mu.Unlock()
+
+
+
+        for column := 0; column < p.ImageWidth; column++ {
+            liveCells := 0
+            for dr := -1; dr <= 1; dr++ {
+                for dc := -1; dc <= 1; dc++ {
+                    if dr == 0 && dc == 0 {
+                        continue
+                    }
+                    nRow := (row + dr + p.ImageHeight) % p.ImageHeight
+                    nCol := (column + dc + p.ImageWidth) % p.ImageWidth
+                    if world[nRow][nCol] == 255 {
+                        liveCells++
+                    }
+                }
+            }
+            if world[row][column] == 255 {
+                if liveCells == 2 || liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            } else {
+                if liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            }
+        }
+    }
+}
+
+
+
+func calculateAliveCells(p Params, world [][]byte) []util.Cell {
+    cellCoordsSlice := []util.Cell{}
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            if world[row][column] == 255 {
+                cellCoordsSlice = append(cellCoordsSlice, util.Cell{X: column, Y: row})
+            }
+        }
+    }
+
+
+
+    return cellCoordsSlice
+}
+
+
+
+// distributor divides the work between workers and interacts with other goroutines.
+func distributor(p Params, c distributorChannels) {
+    // TODO: Create a 2D slice to store the world.
+    c.ioCommand <- ioInput
+    filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
+    c.ioFilename <- filename
+
+
+
+    worldSlice := make([][]byte, p.ImageHeight)
+    for i := 0; i < len(worldSlice); i++ {
+        worldSlice[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            worldSlice[row][column] = <-c.ioInput
+        }
+    }
+
+
+
+    turn := 0
+    c.events <- StateChange{turn, Executing}
+
+
+
+    // TODO: Execute all turns of the Game of Life.
+    newWorld := make([][]byte, p.ImageHeight)
+    for i := range newWorld {
+        newWorld[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    sectionSize := p.ImageHeight / p.Threads
+
+
+
+    var wg sync.WaitGroup
+    var mu sync.Mutex
+    var cond = sync.NewCond(&mu)
+
+
+
+    mustQuit := false
+    pause := false
+
+
+
+    completedTurns := 0
+    aliveCells := calculateAliveCells(p, worldSlice)
+
+
+
+    ticker := time.NewTicker(2 * time.Second)
+    done := make(chan bool)
+    defer ticker.Stop()
+    defer close(done)
+
+
+
+    go func() {
+        for {
+            select {
+            case <-done:
+                return
+            case <-ticker.C:
+                mu.Lock()
+                for pause {
+                    cond.Wait()
+                }
+                mu.Unlock()
+
+
+
+                mu.Lock()
+                safecompletedTurns := completedTurns
+                safealiveCells := aliveCells
+                mu.Unlock()
+
+
+
+                c.events <- AliveCellsCount{CompletedTurns: safecompletedTurns, CellsCount: len(safealiveCells)}
+            }
+        }
+    }()
+
+
+
+    go func() {
+        for {
+            select {
+            case k := <-c.keyPresses:
+                fmt.Println("key received:", string(k))
+
+
+
+                if k == 's' {
+                    mu.Lock()
+                    safeTurns := completedTurns
+
+
+
+                    worldCopy := make([][]byte, p.ImageHeight)
+                    for r := range worldSlice {
+                        worldCopy[r] = make([]byte, p.ImageWidth)
+                        copy(worldCopy[r], worldSlice[r])
+                    }
+                    mu.Unlock()
+
+
+
+                    c.ioCommand <- ioOutput
+                    outputFilename := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, safeTurns)
+                    c.ioFilename <- outputFilename
+
+
+
+                    for row := 0; row < p.ImageHeight; row++ {
+                        for column := 0; column < p.ImageWidth; column++ {
+                            c.ioOutput <- worldCopy[row][column]
+                        }
+                    }
+
+
+
+                    c.ioCommand <- ioCheckIdle
+                    <-c.ioIdle
+                    c.events <- ImageOutputComplete{CompletedTurns: safeTurns, Filename: outputFilename}
+                } else if k == 'q' {
+                    mu.Lock()
+                    mustQuit = true
+                    mu.Unlock()
+
+
+
+                    mu.Lock()
+                    pause = false
+                    cond.Broadcast()
+                    mu.Unlock()
+
+
+
+                    c.events <- StateChange{
+                        CompletedTurns: completedTurns,
+                        NewState:       Quitting,
+                    }
+
+
+
+                    done <- true
+                    return
+                } else if k == 'p' {
+                    mu.Lock()
+                    if pause {
+                        fmt.Println("Resuming the simulation.")
+                        pause = false
+                        cond.Broadcast()
+                        mu.Unlock()
+                        c.events <- StateChange{
+                            CompletedTurns: completedTurns,
+                            NewState:       Executing,
+                        }
+
+
+
+                    } else {
+                        fmt.Println("Pausing the simulation. Press 'p' again to resume.")
+                        pause = true
+                        mu.Unlock()
+                        c.events <- StateChange{
+                            CompletedTurns: completedTurns,
+                            NewState:       Paused,
+                        }
+                    }
+                }
+            case <-done:
+                return
+            }
+        }
+    }()
+
+
+
+    for i := 0; i < p.Turns; i++ {
+        for w := 0; w < p.Threads; w++ {
+            startY := w * sectionSize
+            endY := (w + 1) * sectionSize
+
+
+
+            if w == p.Threads-1 {
+                endY = p.ImageHeight
+            }
+
+
+
+            wg.Add(1)
+
+
+
+            go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond)
+
+
+
+        }
+
+
+
+        wg.Wait()
+
+
+
+        worldSlice, newWorld = newWorld, worldSlice
+
+
+
+        mu.Lock()
+        completedTurns = i + 1
+        aliveCells = calculateAliveCells(p, worldSlice)
+        mu.Unlock()
+
+
+
+        mu.Lock()
+        if mustQuit {
+            mu.Unlock()
+            break
+        }
+        mu.Unlock()
+
+
+
+        c.events <- TurnComplete{CompletedTurns: completedTurns}
+
+
+
+    }
+
+
+
+    //write to pgm file
+    c.ioCommand <- ioOutput
+    var outputFilename string
+
+
+
+    if mustQuit {
+        outputFilename = fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, completedTurns)
+    } else {
+        outputFilename = fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+    }
+    c.ioFilename <- outputFilename
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            c.ioOutput <- worldSlice[row][column]
+        }
+    }
+
+
+
+    // Make sure that the Io has finished any output before exiting.
+    c.ioCommand <- ioCheckIdle
+    <-c.ioIdle
+
+
+
+    // TODO: Report the final state using FinalTurnCompleteEvent.
+    c.events <- FinalTurnComplete{CompletedTurns: completedTurns, Alive: aliveCells}
+    c.events <- ImageOutputComplete{CompletedTurns: completedTurns, Filename: outputFilename}
+    c.events <- StateChange{turn, Quitting}
+
+
+
+    // Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+    close(c.events)
+}
+
+
+Copilot said:
+
+The remaining bug is very likely the snapshot (s) implementation.
+
+You're doing:
+
+Go
+mu.Lock()
+safeTurns := completedTurns
+ 
+worldCopy := make([][]byte, p.ImageHeight)
+for r := range worldSlice {
+    worldCopy[r] = make([]byte, p.ImageWidth)
+    copy(worldCopy[r], worldSlice[r])
+}
+mu.Unlock()
+
+but mu does not protect worldSlice because your workers never lock mu when reading/writing the world.
+
+So this can happen:
+
+Plain Text
+Worker computing generation 84
+↓
+Press s
+↓
+Snapshot starts copying worldSlice
+↓
+Generation finishes
+↓
+worldSlice, newWorld = newWorld, worldSlice
+↓
+Snapshot contains mixed state
+
+That perfectly matches:
+
+Plain Text
+expected 6683 alive cells
+got 6653 instead
+
+because the snapshot is not from a consistent turn boundary.
+
+Best fix
+
+Don't take the snapshot from the keyboard goroutine.
+
+Instead:
+
+Go
+snapshotRequested := false
+
+In keyboard handler:
+
+Go
+if k == 's' {
+    mu.Lock()
+    snapshotRequested = true
+    mu.Unlock()
+}
+
+Then after wg.Wait() in the distributor loop:
+
+Go
+wg.Wait()
+ 
+worldSlice, newWorld = newWorld, worldSlice
+ 
+if snapshotRequested {
+    snapshotRequested = false
+ 
+    // write worldSlice to file here
+}
+
+At this point:
+
+all workers have finished
+no worker is modifying the current generation
+completedTurns matches the board state exactly
+
+which is what the tests expect.
+
+Your quit filename fix looks correct:
+
+Go
+if mustQuit {
+    outputFilename = fmt.Sprintf(
+        "%dx%dx%d",
+        p.ImageWidth,
+        p.ImageHeight,
+        completedTurns,
+    )
+}
+
+The remaining failing test is almost certainly caused by reading worldSlice concurrently during snapshot creation rather than from a completed-generation boundary.
+
+I would also run:
+
+Shell
+go test -race ./tests -run TestKeyboard/s -sdl
+
+because I strongly suspect the race detector will flag accesses around worldSlice and the snapshot code.
+
+You said:
+package gol
+
+
+
+import (
+    "fmt"
+    "sync"
+    "time"
+
+
+
+    "uk.ac.bris.cs/gameoflife/util"
+)
+
+
+
+type distributorChannels struct {
+    events     chan<- Event
+    ioCommand  chan<- ioCommand
+    ioIdle     <-chan bool
+    ioFilename chan<- string
+    ioOutput   chan<- uint8
+    ioInput    <-chan uint8
+    keyPresses <-chan rune
+}
+
+
+
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond) {
+
+
+
+    defer wg.Done()
+
+
+
+    for row := startY; row < endY; row++ {
+
+
+
+        mu.Lock()
+        for *pause {
+            cond.Wait()
+        }
+        mu.Unlock()
+
+
+
+        for column := 0; column < p.ImageWidth; column++ {
+            liveCells := 0
+            for dr := -1; dr <= 1; dr++ {
+                for dc := -1; dc <= 1; dc++ {
+                    if dr == 0 && dc == 0 {
+                        continue
+                    }
+                    nRow := (row + dr + p.ImageHeight) % p.ImageHeight
+                    nCol := (column + dc + p.ImageWidth) % p.ImageWidth
+                    if world[nRow][nCol] == 255 {
+                        liveCells++
+                    }
+                }
+            }
+            if world[row][column] == 255 {
+                if liveCells == 2 || liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            } else {
+                if liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            }
+        }
+    }
+}
+
+
+
+func calculateAliveCells(p Params, world [][]byte) []util.Cell {
+    cellCoordsSlice := []util.Cell{}
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            if world[row][column] == 255 {
+                cellCoordsSlice = append(cellCoordsSlice, util.Cell{X: column, Y: row})
+            }
+        }
+    }
+
+
+
+    return cellCoordsSlice
+}
+
+
+
+// distributor divides the work between workers and interacts with other goroutines.
+func distributor(p Params, c distributorChannels) {
+    // TODO: Create a 2D slice to store the world.
+    c.ioCommand <- ioInput
+    filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
+    c.ioFilename <- filename
+
+
+
+    worldSlice := make([][]byte, p.ImageHeight)
+    for i := 0; i < len(worldSlice); i++ {
+        worldSlice[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            worldSlice[row][column] = <-c.ioInput
+        }
+    }
+
+
+
+    turn := 0
+    c.events <- StateChange{turn, Executing}
+
+
+
+    // TODO: Execute all turns of the Game of Life.
+    newWorld := make([][]byte, p.ImageHeight)
+    for i := range newWorld {
+        newWorld[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    sectionSize := p.ImageHeight / p.Threads
+
+
+
+    var wg sync.WaitGroup
+    var mu sync.Mutex
+    var cond = sync.NewCond(&mu)
+    snapshotRequest := false
+
+
+
+    mustQuit := false
+    pause := false
+
+
+
+    completedTurns := 0
+    aliveCells := calculateAliveCells(p, worldSlice)
+
+
+
+    ticker := time.NewTicker(2 * time.Second)
+    done := make(chan bool)
+    defer ticker.Stop()
+    defer close(done)
+
+
+
+    go func() {
+        for {
+            select {
+            case <-done:
+                return
+            case <-ticker.C:
+                mu.Lock()
+                for pause {
+                    cond.Wait()
+                }
+                mu.Unlock()
+
+
+
+                mu.Lock()
+                safecompletedTurns := completedTurns
+                safealiveCells := aliveCells
+                mu.Unlock()
+
+
+
+                c.events <- AliveCellsCount{CompletedTurns: safecompletedTurns, CellsCount: len(safealiveCells)}
+            }
+        }
+    }()
+
+
+
+    go func() {
+        for {
+            select {
+            case k := <-c.keyPresses:
+                fmt.Println("key received:", string(k))
+
+
+
+                if k == 's' {
+                    mu.Lock()
+                    snapshotRequest=true
+                    mu.Unlock()
+                } else if k == 'q' {
+                    mu.Lock()
+                    mustQuit = true
+                    mu.Unlock()
+
+
+
+                    mu.Lock()
+                    pause = false
+                    cond.Broadcast()
+                    mu.Unlock()
+
+
+
+                    c.events <- StateChange{
+                        CompletedTurns: completedTurns,
+                        NewState:       Quitting,
+                    }
+
+
+
+                    done <- true
+                    return
+                } else if k == 'p' {
+                    mu.Lock()
+                    if pause {
+                        fmt.Println("Resuming the simulation.")
+                        pause = false
+                        cond.Broadcast()
+                        mu.Unlock()
+                        c.events <- StateChange{
+                            CompletedTurns: completedTurns,
+                            NewState:       Executing,
+                        }
+
+
+
+                    } else {
+                        fmt.Println("Pausing the simulation. Press 'p' again to resume.")
+                        pause = true
+                        mu.Unlock()
+                        c.events <- StateChange{
+                            CompletedTurns: completedTurns,
+                            NewState:       Paused,
+                        }
+                    }
+                }
+            case <-done:
+                return
+            }
+        }
+    }()
+
+
+
+    for i := 0; i < p.Turns; i++ {
+        for w := 0; w < p.Threads; w++ {
+            startY := w * sectionSize
+            endY := (w + 1) * sectionSize
+
+
+
+            if w == p.Threads-1 {
+                endY = p.ImageHeight
+            }
+
+
+
+            wg.Add(1)
+
+
+
+            go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond)
+
+
+
+        }
+
+
+
+        wg.Wait()
+
+
+
+        worldSlice, newWorld = newWorld, worldSlice
+
+
+
+        mu.Lock()
+        completedTurns = i + 1
+        aliveCells = calculateAliveCells(p, worldSlice)
+        mu.Unlock()
+
+
+
+        mu.Lock()
+        if mustQuit {
+            mu.Unlock()
+            break
+        }
+        mu.Unlock()
+
+
+
+        mu.Lock()
+        if snapshotRequest {
+
+
+
+            safeTurns := completedTurns
+            worldCopy := make([][]byte, p.ImageHeight)
+            for r := range worldSlice {
+                worldCopy[r] = make([]byte, p.ImageWidth)
+                copy(worldCopy[r], worldSlice[r])
+            }
+            mu.Unlock()
+
+
+
+            c.ioCommand <- ioOutput
+            outputFilename := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, safeTurns)
+            c.ioFilename <- outputFilename
+
+
+
+            for row := 0; row < p.ImageHeight; row++ {
+                for column := 0; column < p.ImageWidth; column++ {
+                    c.ioOutput <- worldCopy[row][column]
+                }
+            }
+
+
+
+            c.ioCommand <- ioCheckIdle
+            <-c.ioIdle
+            c.events <- ImageOutputComplete{CompletedTurns: safeTurns, Filename: outputFilename}
+            snapshotRequest = false
+            
+            mu.Unlock()
+
+
+
+        c.events <- TurnComplete{CompletedTurns: completedTurns}
+
+
+
+    }
+
+
+
+    //write to pgm file
+    c.ioCommand <- ioOutput
+    var outputFilename string
+
+
+
+    if mustQuit {
+        outputFilename = fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, completedTurns)
+    } else {
+        outputFilename = fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+    }
+    c.ioFilename <- outputFilename
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            c.ioOutput <- worldSlice[row][column]
+        }
+    }
+
+
+
+    // Make sure that the Io has finished any output before exiting.
+    c.ioCommand <- ioCheckIdle
+    <-c.ioIdle
+
+
+
+    // TODO: Report the final state using FinalTurnCompleteEvent.
+    c.events <- FinalTurnComplete{CompletedTurns: completedTurns, Alive: aliveCells}
+    c.events <- ImageOutputComplete{CompletedTurns: completedTurns, Filename: outputFilename}
+    c.events <- StateChange{turn, Quitting}
+
+
+
+    // Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+    close(c.events)
+}
+
+
+Copilot said:
+
+You're very close, but I can see a few problems in the latest version.
+
+1. Double mu.Unlock() bug
+
+Inside:
+
+Go
+mu.Lock()
+if snapshotRequest {
+ 
+    safeTurns := completedTurns
+    ...
+ 
+    mu.Unlock()
+ 
+    // write file
+ 
+    snapshotRequest = false
+ 
+    mu.Unlock()
+}
+
+You unlock twice:
+
+Go
+mu.Unlock() // first
+...
+mu.Unlock() // second
+
+That will panic:
+
+Plain Text
+fatal error: sync: unlock of unlocked mutex
+2. snapshotRequest = false is unprotected
+
+You're doing:
+
+Go
+snapshotRequest = false
+
+after unlocking.
+
+Since the keyboard goroutine can do:
+
+Go
+snapshotRequest = true
+
+concurrently, this should be under the mutex.
+
+3. Missing unlock when no snapshot requested
+
+You have:
+
+Go
+mu.Lock()
+if snapshotRequest {
+    ...
+    mu.Unlock()
+}
+
+What happens when:
+
+Go
+snapshotRequest == false
+
+?
+
+The mutex stays locked forever.
+
+You need:
+
+Go
+mu.Lock()
+ 
+if snapshotRequest {
+    ...
+}
+ 
+mu.Unlock()
+
+or store the value:
+
+Go
+mu.Lock()
+doSnapshot := snapshotRequest
+snapshotRequest = false
+mu.Unlock()
+
+and do the expensive work afterwards.
+
+Better pattern
+
+After:
+
+Go
+completedTurns = i + 1
+aliveCells = calculateAliveCells(...)
+
+do:
+
+Go
+mu.Lock()
+ 
+doSnapshot := snapshotRequest
+snapshotRequest = false
+safeTurns := completedTurns
+ 
+var worldCopy [][]byte
+ 
+if doSnapshot {
+    worldCopy = make([][]byte, p.ImageHeight)
+    for r := range worldSlice {
+        worldCopy[r] = make([]byte, p.ImageWidth)
+        copy(worldCopy[r], worldSlice[r])
+    }
+}
+ 
+mu.Unlock()
+
+Then:
+
+Go
+if doSnapshot {
+    // write file
+}
+
+outside the lock.
+
+This is important because file I/O can be slow and you don't want to hold the mutex while writing a PGM.
+
+4. Snapshot location is now correct ✅
+
+Moving snapshot creation to after:
+
+Go
+wg.Wait()
+worldSlice, newWorld = newWorld, worldSlice
+
+was the right move.
+
+At this point:
+
+Go
+worldSlice
+
+represents a fully completed generation, which is what the tests expect.
+
+5. Check braces
+
+The snippet appears to have:
+
+Go
+if snapshotRequest {
+    ...
+    mu.Unlock()
+ 
+c.events <- TurnComplete{...}
+
+which suggests a missing } somewhere around the snapshot section.
+
+I'd make sure the structure is:
+
+Go
+if doSnapshot {
+    ...
+}
+ 
+c.events <- TurnComplete{
+    CompletedTurns: completedTurns,
+}
+
+outside the snapshot block.
+
+I think fixing the mutex handling around snapshotRequest is the next thing to do. After that I'd rerun:
+
+Shell
+go test ./tests -v -run TestKeyboard/s -sdl
+
+because the snapshot being taken at a turn boundary should address the alive-cell mismatch.
+
+You said:
+[{
+	"resource": "/home/eneylonlwin/goProjects/goCoursework/gol/distributor.go",
+	"owner": "go1",
+	"severity": 8,
+	"message": "expected ';', found 'EOF'",
+	"source": "syntax",
+	"startLineNumber": 290,
+	"startColumn": 1,
+	"endLineNumber": 290,
+	"endColumn": 1,
+	"modelVersionId": 837,
+	"origin": "extHost2"
+}
+Copilot said:
+
+That error:
+
+Plain Text
+expected ';', found 'EOF'
+
+almost always means you have an unmatched { somewhere above line 290, so the parser reached the end of the file while still expecting a }.
+
+Looking at the code you pasted, I think the issue is around this section:
+
+Go
+mu.Lock()
+if snapshotRequest {
+ 
+    safeTurns := completedTurns
+    ...
+    snapshotRequest = false
+ 
+    mu.Unlock()
+ 
+c.events <- TurnComplete{CompletedTurns: completedTurns}
+
+You're missing closing braces and the lock structure is malformed.
+
+It should be structured more like:
+
+Go
+mu.Lock()
+ 
+doSnapshot := snapshotRequest
+snapshotRequest = false
+safeTurns := completedTurns
+ 
+var worldCopy [][]byte
+ 
+if doSnapshot {
+    worldCopy = make([][]byte, p.ImageHeight)
+    for r := range worldSlice {
+        worldCopy[r] = make([]byte, p.ImageWidth)
+        copy(worldCopy[r], worldSlice[r])
+    }
+}
+ 
+mu.Unlock()
+ 
+if doSnapshot {
+    c.ioCommand <- ioOutput
+ 
+    outputFilename := fmt.Sprintf(
+        "%dx%dx%d",
+        p.ImageWidth,
+        p.ImageHeight,
+        safeTurns,
+    )
+ 
+    c.ioFilename <- outputFilename
+ 
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            c.ioOutput <- worldCopy[row][column]
+        }
+    }
+ 
+    c.ioCommand <- ioCheckIdle
+    <-c.ioIdle
+ 
+    c.events <- ImageOutputComplete{
+        CompletedTurns: safeTurns,
+        Filename:       outputFilename,
+    }
+}
+ 
+c.events <- TurnComplete{
+    CompletedTurns: completedTurns,
+}
+
+A quick way to find the exact brace mismatch:
+
+Shell
+gofmt distributor.go
+
+or
+
+Shell
+go fmt ./...
+
+gofmt often points very close to the missing }.
+
+I'd specifically inspect the region around:
+
+Go
+if snapshotRequest {
+
+because that's where I can already see braces no longer line up correctly in the pasted code.
+
+You said:
+package gol
+
+
+
+import (
+    "fmt"
+    "sync"
+    "time"
+
+
+
+    "uk.ac.bris.cs/gameoflife/util"
+)
+
+
+
+type distributorChannels struct {
+    events     chan<- Event
+    ioCommand  chan<- ioCommand
+    ioIdle     <-chan bool
+    ioFilename chan<- string
+    ioOutput   chan<- uint8
+    ioInput    <-chan uint8
+    keyPresses <-chan rune
+}
+
+
+
+func calculateNextState(p Params, startY int, endY int, world [][]byte, newWorld [][]byte, wg *sync.WaitGroup, mu *sync.Mutex, pause *bool, cond *sync.Cond) {
+
+
+
+    defer wg.Done()
+
+
+
+    for row := startY; row < endY; row++ {
+
+
+
+        mu.Lock()
+        for *pause {
+            cond.Wait()
+        }
+        mu.Unlock()
+
+
+
+        for column := 0; column < p.ImageWidth; column++ {
+            liveCells := 0
+            for dr := -1; dr <= 1; dr++ {
+                for dc := -1; dc <= 1; dc++ {
+                    if dr == 0 && dc == 0 {
+                        continue
+                    }
+                    nRow := (row + dr + p.ImageHeight) % p.ImageHeight
+                    nCol := (column + dc + p.ImageWidth) % p.ImageWidth
+                    if world[nRow][nCol] == 255 {
+                        liveCells++
+                    }
+                }
+            }
+            if world[row][column] == 255 {
+                if liveCells == 2 || liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            } else {
+                if liveCells == 3 {
+                    newWorld[row][column] = 255
+                } else {
+                    newWorld[row][column] = 0
+                }
+            }
+        }
+    }
+}
+
+
+
+func calculateAliveCells(p Params, world [][]byte) []util.Cell {
+    cellCoordsSlice := []util.Cell{}
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            if world[row][column] == 255 {
+                cellCoordsSlice = append(cellCoordsSlice, util.Cell{X: column, Y: row})
+            }
+        }
+    }
+
+
+
+    return cellCoordsSlice
+}
+
+
+
+// distributor divides the work between workers and interacts with other goroutines.
+func distributor(p Params, c distributorChannels) {
+    // TODO: Create a 2D slice to store the world.
+    c.ioCommand <- ioInput
+    filename := fmt.Sprintf("%dx%d", p.ImageWidth, p.ImageHeight)
+    c.ioFilename <- filename
+
+
+
+    worldSlice := make([][]byte, p.ImageHeight)
+    for i := 0; i < len(worldSlice); i++ {
+        worldSlice[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    for row := 0; row < p.ImageHeight; row++ {
+        for column := 0; column < p.ImageWidth; column++ {
+            worldSlice[row][column] = <-c.ioInput
+        }
+    }
+
+
+
+    turn := 0
+    c.events <- StateChange{turn, Executing}
+
+
+
+    // TODO: Execute all turns of the Game of Life.
+    newWorld := make([][]byte, p.ImageHeight)
+    for i := range newWorld {
+        newWorld[i] = make([]byte, p.ImageWidth)
+    }
+
+
+
+    sectionSize := p.ImageHeight / p.Threads
+
+
+
+    var wg sync.WaitGroup
+    var mu sync.Mutex
+    var cond = sync.NewCond(&mu)
+    snapshotRequest := false
+
+
+
+    mustQuit := false
+    pause := false
+
+
+
+    completedTurns := 0
+    aliveCells := calculateAliveCells(p, worldSlice)
+
+
+
+    ticker := time.NewTicker(2 * time.Second)
+    done := make(chan bool)
+    defer ticker.Stop()
+    defer close(done)
+
+
+
+    go func() {
+        for {
+            select {
+            case <-done:
+                return
+            case <-ticker.C:
+                mu.Lock()
+                for pause {
+                    cond.Wait()
+                }
+                mu.Unlock()
+
+
+
+                mu.Lock()
+                safecompletedTurns := completedTurns
+                safealiveCells := aliveCells
+                mu.Unlock()
+
+
+
+                c.events <- AliveCellsCount{CompletedTurns: safecompletedTurns, CellsCount: len(safealiveCells)}
+            }
+        }
+    }()
+
+
+
+    go func() {
+        for {
+            select {
+            case k := <-c.keyPresses:
+                fmt.Println("key received:", string(k))
+
+
+
+                if k == 's' {
+                    mu.Lock()
+                    snapshotRequest = true
+                    mu.Unlock()
+                } else if k == 'q' {
+                    mu.Lock()
+                    mustQuit = true
+                    mu.Unlock()
+
+
+
+                    mu.Lock()
+                    pause = false
+                    cond.Broadcast()
+                    mu.Unlock()
+
+
+
+                    c.events <- StateChange{
+                        CompletedTurns: completedTurns,
+                        NewState:       Quitting,
+                    }
+
+
+
+                    done <- true
+                    return
+                } else if k == 'p' {
+                    mu.Lock()
+                    if pause {
+                        fmt.Println("Resuming the simulation.")
+                        pause = false
+                        cond.Broadcast()
+                        mu.Unlock()
+                        c.events <- StateChange{
+                            CompletedTurns: completedTurns,
+                            NewState:       Executing,
+                        }
+
+
+
+                    } else {
+                        fmt.Println("Pausing the simulation. Press 'p' again to resume.")
+                        pause = true
+                        mu.Unlock()
+                        c.events <- StateChange{
+                            CompletedTurns: completedTurns,
+                            NewState:       Paused,
+                        }
+                    }
+                }
+            case <-done:
+                return
+            }
+        }
+    }()
+
+
+
+    for i := 0; i < p.Turns; i++ {
+        for w := 0; w < p.Threads; w++ {
+            startY := w * sectionSize
+            endY := (w + 1) * sectionSize
+
+
+
+            if w == p.Threads-1 {
+                endY = p.ImageHeight
+            }
+
+
+
+            wg.Add(1)
+
+
+
+            go calculateNextState(p, startY, endY, worldSlice, newWorld, &wg, &mu, &pause, cond)
+
+
+
+        }
+
+
+
+        wg.Wait()
+
+
+
+        worldSlice, newWorld = newWorld, worldSlice
+
+
+
+        mu.Lock()
+        completedTurns = i + 1
+        aliveCells = calculateAliveCells(p, worldSlice)
+        mu.Unlock()
+
+
+
+        mu.Lock()
+        if mustQuit {
+            mu.Unlock()
+            break
+        }
+        mu.Unlock()
+
+
+
+        mu.Lock()
+        if snapshotRequest {
+            safeTurns := completedTurns
+            worldCopy := make([][]byte, p.ImageHeight)
+            for r := range worldSlice {
+                worldCopy[r] = make([]byte, p.ImageWidth)
+                copy(worldCopy[r], worldSlice[r])
+            }
+
+
+
+            c.ioCommand <- ioOutput
+            outputFilename := fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, safeTurns)
+            c.ioFilename <- outputFilename
+
+
+
+            for row := 0; row < p.ImageHeight; row++ {
+                for column := 0; column < p.ImageWidth; column++ {
+                    c.ioOutput <- worldCopy[row][column]
+                }
+            }
+
+
+
+            c.ioCommand <- ioCheckIdle
+            <-c.ioIdle
+            c.events <- ImageOutputComplete{CompletedTurns: safeTurns, Filename: outputFilename}
+            snapshotRequest = false
+
+
+
+            mu.Unlock()
+
+
+
+            c.events <- TurnComplete{CompletedTurns: completedTurns}
+
+
+
+        }
+
+
+
+        //write to pgm file
+        c.ioCommand <- ioOutput
+        var outputFilename string
+
+
+
+        if mustQuit {
+            outputFilename = fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, completedTurns)
+        } else {
+            outputFilename = fmt.Sprintf("%dx%dx%d", p.ImageWidth, p.ImageHeight, p.Turns)
+        }
+        c.ioFilename <- outputFilename
+
+
+
+        for row := 0; row < p.ImageHeight; row++ {
+            for column := 0; column < p.ImageWidth; column++ {
+                c.ioOutput <- worldSlice[row][column]
+            }
+        }
+
+
+
+        // Make sure that the Io has finished any output before exiting.
+        c.ioCommand <- ioCheckIdle
+        <-c.ioIdle
+
+
+
+        // TODO: Report the final state using FinalTurnCompleteEvent.
+        c.events <- FinalTurnComplete{CompletedTurns: completedTurns, Alive: aliveCells}
+        c.events <- ImageOutputComplete{CompletedTurns: completedTurns, Filename: outputFilename}
+        c.events <- StateChange{turn, Quitting}
+
+
+
+        // Close the channel to stop the SDL goroutine gracefully. Removing may cause deadlock.
+        close(c.events)
+    }
+} is the copying fine
+
+
+Copilot said:
+
+The copying itself is fine:
+
+Go
+worldCopy := make([][]byte, p.ImageHeight)
+for r := range worldSlice {
+    worldCopy[r] = make([]byte, p.ImageWidth)
+    copy(worldCopy[r], worldSlice[r])
+}
+
+That's a proper deep copy of the 2D slice.
+
+However, I see a much bigger problem.
+
+You're holding mu during I/O
+
+You do:
+
+Go
+mu.Lock()
+if snapshotRequest {
+    ...
+    c.ioCommand <- ioOutput
+    ...
+    <-c.ioIdle
+    ...
+    mu.Unlock()
+}
+
+That's dangerous. You're holding the mutex while:
+
+writing the whole image
+waiting for I/O
+sending events
+
+which can block other goroutines for a long time.
+
+You also have a lock leak
+
+If:
+
+Go
+snapshotRequest == false
+
+you do:
+
+Go
+mu.Lock()
+if snapshotRequest {
+    ...
+    mu.Unlock()
+}
+
+and there's no unlock afterwards.
+
+So the mutex stays locked forever.
+
+That alone can cause weird hangs.
+
+Another bug
+
+Your:
+
+Go
+c.events <- TurnComplete{CompletedTurns: completedTurns}
+
+is inside:
+
+Go
+if snapshotRequest {
+
+So if there's no snapshot request, you never send TurnComplete.
+
+That's wrong.
+
+It should happen every turn.
+
+Even bigger issue
+
+Everything after:
+
+Go
+//write to pgm file
+
+looks like it's inside your main turn loop.
+
+From the indentation, I think you accidentally moved:
+
+Go
+c.ioCommand <- ioOutput
+...
+close(c.events)
+
+inside:
+
+Go
+for i := 0; i < p.Turns; i++ {
+
+which would be disastrous.
+
+The final output section should be after the turn loop finishes.
+
+What I'd do
+
+After:
+
+Go
+completedTurns = i + 1
+aliveCells = calculateAliveCells(...)
+
+do:
+
+Go
+mu.Lock()
+ 
+doSnapshot := snapshotRequest
+snapshotRequest = false
+safeTurns := completedTurns
+ 
+var worldCopy [][]byte
+ 
+if doSnapshot {
+    worldCopy = make([][]byte, p.ImageHeight)
+    for r := range worldSlice {
+        worldCopy[r] = make([]byte, p.ImageWidth)
+        copy(worldCopy[r], worldSlice[r])
+    }
+}
+ 
+mu.Unlock()
+
+Then:
+
+Go
+if doSnapshot {
+    // perform IO here
+}
+
+outside the lock.
+
+Then always:
+
+Go
+c.events <- TurnComplete{
+    CompletedTurns: completedTurns,
+}
+
+regardless of snapshots.
+
+So:
+
+✅ copy logic is good
+❌ mutex usage around snapshot isn't
+❌ missing unlock when snapshotRequest == false
+❌ TurnComplete is currently in the wrong place
+❌ I suspect the final output code may have accidentally ended up inside the turn loop due to brace placement
+
+I'd run go fmt and carefully check the brace nesting around the turn loop first. That's where most of the remaining issues appear to be.
